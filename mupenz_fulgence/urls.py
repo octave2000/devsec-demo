@@ -22,6 +22,9 @@ urlpatterns = [
     path('staff/',        views.StaffDashboardView.as_view(), name='staff_dashboard'),
     path('staff/users/',  views.UserListView.as_view(),       name='user_list'),
 
+    # ── IDOR-safe profile detail (own profile for users; any for staff/admin) ──
+    path('users/<int:pk>/profile/', views.UserProfileDetailView.as_view(), name='user_profile_detail'),
+
     # ── RBAC — Admin only ─────────────────────────────────────────────────────
     path('admin-panel/', views.AdminDashboardView.as_view(), name='admin_dashboard'),
 ]

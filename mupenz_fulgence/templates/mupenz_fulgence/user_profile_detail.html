@@ -1,0 +1,117 @@
+{% extends 'mupenz_fulgence/base.html' %}
+
+{% block title %}{{ viewed_user.username }}'s Profile | MF Auth{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-7">
+
+    <!-- Staff notice — shown only when staff is viewing someone else's profile -->
+    {% if is_staff_member and viewed_user != user %}
+    <div class="alert alert-info d-flex align-items-center gap-2 mb-4" role="alert">
+      <i class="bi bi-shield-check fs-5"></i>
+      <div>
+        <strong>Staff view:</strong> You are viewing
+        <strong>{{ viewed_user.username }}</strong>'s profile (read-only).
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-body p-4 p-md-5">
+
+        <!-- Header row: name + role badge -->
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
+          <div>
+            <h3 class="fw-bold mb-1">
+              {{ viewed_user.get_full_name|default:viewed_user.username }}
+            </h3>
+            <span class="text-muted small">@{{ viewed_user.username }}</span>
+          </div>
+          {% if viewed_role == 'admin' %}
+            <span class="badge bg-danger fs-6 px-3 py-2">
+              <i class="bi bi-shield-fill-exclamation me-1"></i> Admin
+            </span>
+          {% elif viewed_role == 'staff' %}
+            <span class="badge bg-warning text-dark fs-6 px-3 py-2">
+              <i class="bi bi-speedometer2 me-1"></i> Staff
+            </span>
+          {% elif viewed_role == 'instructor' %}
+            <span class="badge bg-info text-dark fs-6 px-3 py-2">
+              <i class="bi bi-mortarboard-fill me-1"></i> Instructor
+            </span>
+          {% elif viewed_role == 'student' %}
+            <span class="badge bg-success fs-6 px-3 py-2">
+              <i class="bi bi-backpack-fill me-1"></i> Student
+            </span>
+          {% else %}
+            <span class="badge bg-secondary fs-6 px-3 py-2">
+              <i class="bi bi-person-fill me-1"></i> User
+            </span>
+          {% endif %}
+        </div>
+
+        <!-- Account info -->
+        <h6 class="text-muted text-uppercase small fw-semibold mb-2">
+          <i class="bi bi-person-circle me-1"></i>Account
+        </h6>
+        <ul class="list-unstyled mb-4 small">
+          <li class="mb-2">
+            <span class="text-muted">Email</span><br>
+            <strong>{{ viewed_user.email|default:"—" }}</strong>
+          </li>
+          <li>
+            <span class="text-muted">Member since</span><br>
+            <strong>{{ viewed_user.date_joined|date:"F j, Y" }}</strong>
+          </li>
+        </ul>
+
+        <hr class="my-3">
+
+        <!-- Profile info -->
+        <h6 class="text-muted text-uppercase small fw-semibold mb-2">
+          <i class="bi bi-card-text me-1"></i>Profile
+        </h6>
+        {% if profile %}
+        <ul class="list-unstyled mb-4 small">
+          <li class="mb-2">
+            <span class="text-muted">Location</span><br>
+            <strong>{{ profile.location|default:"—" }}</strong>
+          </li>
+          <li class="mb-2">
+            <span class="text-muted">Birth Date</span><br>
+            <strong>{{ profile.birth_date|date:"F j, Y"|default:"—" }}</strong>
+          </li>
+          <li>
+            <span class="text-muted">Bio</span><br>
+            <span>{{ profile.bio|default:"No bio yet." }}</span>
+          </li>
+        </ul>
+        {% else %}
+        <p class="text-muted small">No profile data.</p>
+        {% endif %}
+
+        <!-- Action buttons -->
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          {% if viewed_user == user %}
+            <!-- Viewing own profile -->
+            <a href="{% url 'mupenz_fulgence:profile' %}" class="btn btn-primary btn-sm">
+              <i class="bi bi-pencil-fill me-1"></i> Edit My Profile
+            </a>
+            <a href="{% url 'mupenz_fulgence:dashboard' %}" class="btn btn-outline-secondary btn-sm">
+              <i class="bi bi-grid me-1"></i> Dashboard
+            </a>
+          {% elif is_staff_member %}
+            <!-- Staff viewing another user's profile -->
+            <a href="{% url 'mupenz_fulgence:user_list' %}" class="btn btn-outline-secondary btn-sm">
+              <i class="bi bi-arrow-left me-1"></i> Back to User Management
+            </a>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

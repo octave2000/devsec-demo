@@ -3,13 +3,19 @@ from django.contrib.auth import views as auth_views
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group, User
 from django.db.models import Q
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
 from django.views.generic import CreateView, ListView, TemplateView, UpdateView
 
 from .forms import ProfileUpdateForm, RegistrationForm
 from .models import Profile
-from .rbac import AdminRequiredMixin, InstructorRequiredMixin, StaffRequiredMixin, get_user_role
+from .rbac import (
+    AdminRequiredMixin,
+    InstructorRequiredMixin,
+    StaffRequiredMixin,
+    get_user_role,
+    is_staff_or_admin,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +303,11 @@ class UserListView(StaffRequiredMixin, ListView):
                     role = 'user'
             u.computed_role    = role
             u.role_badge_class = self._ROLE_BADGE[role]
+            # Profile pk for the detail-view link; None when profile absent
+            try:
+                u.profile_pk = u.profile.pk
+            except Profile.DoesNotExist:
+                u.profile_pk = None
         context['search_query'] = self.request.GET.get('q', '')
         return context
 
@@ -322,4 +333,51 @@ class AdminDashboardView(AdminRequiredMixin, TemplateView):
             g.member_count = g.user_set.count()
         context['groups'] = groups
         context['recent_users'] = User.objects.order_by('-date_joined')[:5]
+        return context
+
+
+# ---------------------------------------------------------------------------
+# IDOR / Broken Access Control — User Profile Detail  (all authenticated users)
+# ---------------------------------------------------------------------------
+
+class UserProfileDetailView(LoginRequiredMixin, TemplateView):
+    """
+    Read-only profile detail page keyed by Profile primary key.
+
+    ── IDOR / Broken Access Control protection ──────────────────────────────────
+    Vulnerability class : Insecure Direct Object Reference (IDOR)
+    OWASP category      : A01:2021 – Broken Access Control
+
+    INSECURE pattern (never use):
+        profile = get_object_or_404(Profile, pk=pk)
+        # Any authenticated user can read ANY profile by enumerating pk values.
+
+    SECURE pattern used here:
+        Regular users  → get_object_or_404(Profile, pk=pk, user=request.user)
+            • Returns HTTP 404 for every foreign pk value.
+            • 404 rather than 403 is deliberate: a 403 would confirm the pk
+              exists, leaking object existence to an enumerating attacker.
+              HTTP 404 is indistinguishable from "not found".
+
+        Staff / admins → get_object_or_404(Profile, pk=pk)
+            • Staff legitimately need full profile access for user management.
+            • The unrestricted query only executes after the role check passes.
+    ─────────────────────────────────────────────────────────────────────────────
+    """
+    template_name = 'mupenz_fulgence/user_profile_detail.html'
+    login_url = reverse_lazy('mupenz_fulgence:login')
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        pk = self.kwargs['pk']
+        if is_staff_or_admin(self.request.user):
+            # Staff / admins: unrestricted access for user management purposes
+            profile = get_object_or_404(Profile, pk=pk)
+        else:
+            # Regular users: ownership filter prevents IDOR
+            # Returns 404 (not 403) to avoid leaking whether the object exists
+            profile = get_object_or_404(Profile, pk=pk, user=self.request.user)
+        context['profile']     = profile
+        context['viewed_user'] = profile.user
+        context['viewed_role'] = get_user_role(profile.user)
         return context
