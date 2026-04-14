@@ -6,6 +6,10 @@ body:
     attributes:
       value: |
         Use this template to assign a student a complete UAS Django app project.
+        
+        Student submissions should follow the repository AI and authorship policy:
+        limited AI support is allowed with disclosure, but students must own the
+        design and implementation and be able to explain their security choices.
   - type: textarea
     id: objective
     attributes:
@@ -14,12 +18,20 @@ body:
       placeholder: Practice planning, building, documenting, and validating a complete Django app using production-style conventions.
     validations:
       required: true
+  - type: input
+    id: required-submission-branch
+    attributes:
+      label: Required submission branch
+      description: Name the exact `assignment/...` branch students must target with their pull requests.
+      placeholder: assignment/uas-auth-service
+    validations:
+      required: true
   - type: textarea
     id: student-name
     attributes:
       label: Student identity and app name
       description: State the student name and the Django app name that must be derived from it.
-      placeholder: Student name: Jane Doe. Required app name: janedoe or jane_doe.
+      placeholder: "Student name: Jane Doe. Required app name: janedoe or jane_doe."
     validations:
       required: true
   - type: textarea
@@ -78,6 +90,19 @@ body:
       description: Share relevant repository paths, suggested patterns, feature boundaries, or design constraints.
     validations:
       required: false
+  - type: textarea
+    id: ai-authorship-expectations
+    attributes:
+      label: AI use and authorship expectations
+      description: State the disclosure and explanation expectations students must follow in their submission.
+      placeholder: |
+        - Limited AI use is allowed for explanations, debugging hints, and documentation lookup
+        - Students must disclose any AI assistance in the pull request
+        - Students must be able to explain the final design, security choices, and tests without help
+        - Students should include a short design note and meaningful commit history
+        - Students must open the PR against the required submission branch named above
+    validations:
+      required: true
   - type: textarea
     id: additional-context
     attributes:

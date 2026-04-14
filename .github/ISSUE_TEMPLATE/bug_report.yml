@@ -6,12 +6,24 @@ body:
     attributes:
       value: |
         Use this template to assign students a bug-fix task related to web security.
+        
+        Student submissions should follow the repository AI and authorship policy:
+        limited AI support is allowed with disclosure, but students must own the
+        implementation and be able to explain their security decisions and tests.
   - type: textarea
     id: objective
     attributes:
       label: Learning objective
       description: Describe what students should learn by completing this task.
       placeholder: Practice identifying and fixing a security issue in the Django app.
+    validations:
+      required: true
+  - type: input
+    id: required-submission-branch
+    attributes:
+      label: Required submission branch
+      description: Name the exact `assignment/...` branch students must target with their pull requests.
+      placeholder: assignment/example-security-task
     validations:
       required: true
   - type: textarea
@@ -48,6 +60,19 @@ body:
       placeholder: Mention likely files, endpoints, or setup notes.
     validations:
       required: false
+  - type: textarea
+    id: ai-authorship-expectations
+    attributes:
+      label: AI use and authorship expectations
+      description: State the disclosure and explanation expectations students must follow in their submission.
+      placeholder: |
+        - Limited AI use is allowed for explanations, debugging hints, and documentation lookup
+        - Students must disclose any AI assistance in the pull request
+        - Students must be able to explain the final code, security choices, and tests without help
+        - Students should include a short design note and meaningful commit history
+        - Students must open the PR against the required submission branch named above
+    validations:
+      required: true
   - type: textarea
     id: additional-context
     attributes:
