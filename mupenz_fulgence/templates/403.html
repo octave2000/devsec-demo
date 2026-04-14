@@ -1,0 +1,29 @@
+{% extends 'mupenz_fulgence/base.html' %}
+
+{% block title %}403 Forbidden | MF Auth{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-6 text-center py-5">
+    <div class="card">
+      <div class="card-body p-5">
+        <div class="display-1 fw-bold text-danger mb-3">403</div>
+        <h2 class="fw-bold mb-2">Access Denied</h2>
+        <p class="text-muted mb-4">
+          You do not have permission to view this page.<br>
+          If you believe this is an error, please contact an administrator.
+        </p>
+        {% if user.is_authenticated %}
+          <a href="{% url 'mupenz_fulgence:dashboard' %}" class="btn btn-primary">
+            <i class="bi bi-house-fill me-1"></i> Back to Dashboard
+          </a>
+        {% else %}
+          <a href="{% url 'mupenz_fulgence:login' %}" class="btn btn-primary">
+            <i class="bi bi-box-arrow-in-right me-1"></i> Sign In
+          </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

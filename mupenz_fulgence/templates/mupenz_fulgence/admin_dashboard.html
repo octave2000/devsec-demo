@@ -1,0 +1,169 @@
+{% extends 'mupenz_fulgence/base.html' %}
+
+{% block title %}Admin Dashboard | MF Auth{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-11">
+
+    <!-- Header -->
+    <div class="card mb-4 border-start border-danger border-4">
+      <div class="card-body px-4 py-3 d-flex align-items-center gap-3">
+        <i class="bi bi-shield-fill-exclamation fs-2 text-danger"></i>
+        <div>
+          <h2 class="fw-bold mb-0">Admin Dashboard</h2>
+          <small class="text-muted">
+            Role: <span class="badge bg-danger">ADMIN</span>
+            &mdash; Full system access
+          </small>
+        </div>
+      </div>
+    </div>
+
+    <!-- System stats -->
+    <div class="row g-3 mb-4">
+      <div class="col-6 col-md-3">
+        <div class="card text-center h-100">
+          <div class="card-body">
+            <div class="display-6 fw-bold text-primary">{{ total_users }}</div>
+            <div class="text-muted small mt-1">Total Users</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="card text-center h-100">
+          <div class="card-body">
+            <div class="display-6 fw-bold text-warning">{{ total_staff }}</div>
+            <div class="text-muted small mt-1">Staff Members</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="card text-center h-100">
+          <div class="card-body">
+            <div class="display-6 fw-bold text-danger">{{ total_admins }}</div>
+            <div class="text-muted small mt-1">Admins</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="card text-center h-100">
+          <div class="card-body">
+            <div class="display-6 fw-bold text-secondary">{{ total_inactive }}</div>
+            <div class="text-muted small mt-1">Inactive</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-4">
+
+      <!-- Groups & Permissions -->
+      <div class="col-lg-5">
+        <div class="card h-100">
+          <div class="card-header bg-white fw-semibold py-3">
+            <i class="bi bi-diagram-3-fill me-2 text-danger"></i>Groups & Permissions
+          </div>
+          <div class="card-body">
+            {% if groups %}
+              <ul class="list-group list-group-flush">
+                {% for g in groups %}
+                <li class="list-group-item d-flex justify-content-between align-items-start px-0">
+                  <div>
+                    <span class="fw-semibold">{{ g.name }}</span>
+                    <div class="text-muted small">
+                      {% for p in g.permissions.all %}
+                        <span class="badge bg-light text-dark border me-1">{{ p.codename }}</span>
+                      {% empty %}
+                        <em>No permissions assigned</em>
+                      {% endfor %}
+                    </div>
+                  </div>
+                  <span class="badge bg-primary rounded-pill">{{ g.member_count }}</span>
+                </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="text-muted mb-0">
+                No groups yet. Run
+                <code>python manage.py setup_groups</code>
+                to create default RBAC groups.
+              </p>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent users + admin actions -->
+      <div class="col-lg-7">
+        <div class="card mb-3">
+          <div class="card-header bg-white fw-semibold py-3">
+            <i class="bi bi-person-lines-fill me-2 text-danger"></i>Most Recent Users
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover mb-0 small">
+                <thead class="table-light">
+                  <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Joined</th>
+                    <th>Flags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for u in recent_users %}
+                  <tr>
+                    <td class="fw-semibold">{{ u.username }}</td>
+                    <td>{{ u.email|default:"—" }}</td>
+                    <td class="text-muted">{{ u.date_joined|date:"M d, Y" }}</td>
+                    <td>
+                      {% if u.is_superuser %}<span class="badge bg-danger">su</span>{% endif %}
+                      {% if u.is_staff %}<span class="badge bg-warning text-dark">staff</span>{% endif %}
+                      {% if not u.is_active %}<span class="badge bg-secondary">inactive</span>{% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin quick-actions -->
+        <div class="card">
+          <div class="card-header bg-white fw-semibold py-3">
+            <i class="bi bi-lightning-charge-fill me-2 text-danger"></i>Admin Actions
+          </div>
+          <div class="card-body d-flex flex-column gap-2">
+            <a href="{% url 'mupenz_fulgence:user_list' %}" class="btn btn-outline-primary text-start btn-sm">
+              <i class="bi bi-people me-2"></i>Manage All Users
+            </a>
+            <a href="{% url 'mupenz_fulgence:staff_dashboard' %}" class="btn btn-outline-warning text-start btn-sm">
+              <i class="bi bi-speedometer2 me-2"></i>Staff Dashboard
+            </a>
+            <a href="/admin/auth/user/" class="btn btn-outline-secondary text-start btn-sm">
+              <i class="bi bi-person-gear me-2"></i>Django User Admin
+            </a>
+            <a href="/admin/auth/group/" class="btn btn-outline-secondary text-start btn-sm">
+              <i class="bi bi-diagram-3 me-2"></i>Django Group Admin
+            </a>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /row -->
+
+    <!-- Security notice -->
+    <div class="alert alert-danger mt-4 d-flex gap-2 align-items-start">
+      <i class="bi bi-exclamation-triangle-fill fs-5 mt-1 flex-shrink-0"></i>
+      <div>
+        <strong>Admin access is logged.</strong>
+        All privileged actions performed here are subject to audit.
+        Apply the principle of least privilege when assigning roles.
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

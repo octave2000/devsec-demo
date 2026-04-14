@@ -1,0 +1,154 @@
+{% extends 'mupenz_fulgence/base.html' %}
+
+{% block title %}Staff Dashboard | MF Auth{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-11">
+
+    <!-- Header -->
+    <div class="card mb-4 border-start border-warning border-4">
+      <div class="card-body px-4 py-3 d-flex align-items-center gap-3">
+        <i class="bi bi-speedometer2 fs-2 text-warning"></i>
+        <div>
+          <h2 class="fw-bold mb-0">Staff Dashboard</h2>
+          <small class="text-muted">
+            Role: <span class="badge bg-warning text-dark">{{ user_role|upper }}</span>
+            &mdash; User management and system overview
+          </small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stat cards -->
+    <div class="row g-3 mb-4">
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-primary">{{ total_users }}</div>
+            <div class="text-muted small">Total Users</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-success">{{ total_active }}</div>
+            <div class="text-muted small">Active</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-secondary">{{ total_regular }}</div>
+            <div class="text-muted small">Regular Users</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-success">{{ total_students }}</div>
+            <div class="text-muted small">Students</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-info">{{ total_instructors }}</div>
+            <div class="text-muted small">Instructors</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-warning">{{ total_staff }}</div>
+            <div class="text-muted small">Staff</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-2">
+        <div class="card text-center h-100">
+          <div class="card-body py-3">
+            <div class="fs-2 fw-bold text-danger">{{ total_admins }}</div>
+            <div class="text-muted small">Admins</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent registrations + quick links -->
+    <div class="row g-4">
+      <div class="col-lg-8">
+        <div class="card h-100">
+          <div class="card-header bg-white fw-semibold py-3">
+            <i class="bi bi-clock-history me-2 text-warning"></i>Recent Registrations
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Joined</th>
+                    <th>Role</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for u in recent_users %}
+                  <tr>
+                    <td class="fw-semibold">{{ u.username }}</td>
+                    <td><small>{{ u.email|default:"—" }}</small></td>
+                    <td><small class="text-muted">{{ u.date_joined|date:"M d, Y" }}</small></td>
+                    <td>
+                      {% if u.is_superuser %}
+                        <span class="badge bg-danger">Admin</span>
+                      {% elif u.is_staff %}
+                        <span class="badge bg-warning text-dark">Staff</span>
+                      {% else %}
+                        <span class="badge bg-secondary">User</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% empty %}
+                  <tr><td colspan="4" class="text-muted text-center py-4">No users yet.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card h-100">
+          <div class="card-header bg-white fw-semibold py-3">
+            <i class="bi bi-lightning-fill me-2 text-warning"></i>Quick Actions
+          </div>
+          <div class="card-body d-flex flex-column gap-2">
+            <a href="{% url 'mupenz_fulgence:user_list' %}" class="btn btn-outline-primary text-start">
+              <i class="bi bi-people me-2"></i>Manage Users
+            </a>
+            <a href="{% url 'mupenz_fulgence:instructor_panel' %}" class="btn btn-outline-info text-start">
+              <i class="bi bi-mortarboard me-2"></i>Instructor Panel
+            </a>
+            {% if is_admin %}
+            <a href="{% url 'mupenz_fulgence:admin_dashboard' %}" class="btn btn-outline-danger text-start">
+              <i class="bi bi-shield-shaded me-2"></i>Admin Dashboard
+            </a>
+            {% endif %}
+            <a href="/admin/" class="btn btn-outline-secondary text-start">
+              <i class="bi bi-gear me-2"></i>Django Admin
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
