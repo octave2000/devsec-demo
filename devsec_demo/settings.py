@@ -172,3 +172,68 @@ DEFAULT_FROM_EMAIL = os.environ.get('DJANGO_DEFAULT_FROM_EMAIL', 'noreply@mf-aut
 # exploitable.  The token is also single-use — it becomes invalid the moment
 # the password is changed (because the HMAC input includes the password hash).
 PASSWORD_RESET_TIMEOUT = 3600  # 1 hour
+
+# ── Audit logging ──────────────────────────────────────────────────────────
+# All security-relevant events are emitted on the 'mupenz_fulgence.audit'
+# logger via mupenz_fulgence.audit_logger.log_event().
+#
+# Development default: records go to both the console (stdout) and a
+# rotating log file at logs/audit.log.
+#
+# Production guidance:
+#   • Set DJANGO_LOG_LEVEL to 'INFO' in the environment.
+#   • Redirect 'mupenz_fulgence.audit' to syslog, a SIEM, or a log
+#     aggregation service (ELK, CloudWatch, Splunk) by overriding the
+#     handlers list in your deployment-specific settings file.
+#   • Never disable propagate=False — it prevents audit records from
+#     being swallowed or duplicated by the root logger.
+#
+# Sensitive-data policy (enforced in audit_logger.py, verified by tests):
+#   ✗ Raw passwords, password hashes, reset tokens, session cookies
+#   ✓ user_id, username, IP address, event type, safe metadata
+
+_LOG_DIR = BASE_DIR / 'logs'
+_LOG_DIR.mkdir(exist_ok=True)          # Create on first run; no-op if present
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+
+    'formatters': {
+        # Compact, human-readable format: timestamp [AUDIT] key=value ...
+        'audit': {
+            'format': '%(asctime)s [AUDIT] %(message)s',
+            'datefmt': '%Y-%m-%dT%H:%M:%SZ',
+        },
+    },
+
+    'handlers': {
+        # Console handler — always active; useful in development and in
+        # containerised deployments where stdout is captured by the runtime.
+        'audit_console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'audit',
+        },
+        # Rotating file handler — keeps up to 5 × 10 MB files.
+        # Rotate on size rather than time to prevent unbounded disk growth.
+        'audit_file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(_LOG_DIR / 'audit.log'),
+            'maxBytes': 10 * 1024 * 1024,   # 10 MB per file
+            'backupCount': 5,                # audit.log + audit.log.1 … .5
+            'formatter': 'audit',
+            'encoding': 'utf-8',
+        },
+    },
+
+    'loggers': {
+        # Route ALL audit events to both handlers.
+        # propagate=False prevents records from bubbling up to the root
+        # logger (which might have a different level or handlers).
+        'mupenz_fulgence.audit': {
+            'handlers': ['audit_console', 'audit_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}

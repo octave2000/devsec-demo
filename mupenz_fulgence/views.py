@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
 from django.views.generic import CreateView, ListView, TemplateView, UpdateView
 
+from .audit_logger import AuditEvent, log_event
 from .forms import ProfileUpdateForm, RegistrationForm
 from .login_protection import (
     LOCKOUT_DURATION,
@@ -47,6 +48,8 @@ class RegisterView(CreateView):
 
     def form_valid(self, form):
         response = super().form_valid(form)
+        # self.object is the newly created User instance (set by CreateView)
+        log_event(AuditEvent.REGISTER_SUCCESS, request=self.request, user=self.object)
         messages.success(
             self.request,
             f'Account created for "{self.object.username}". You can now sign in.',
@@ -98,6 +101,16 @@ class UserLoginView(auth_views.LoginView):
         """Block locked accounts before the form is even validated."""
         username = request.POST.get('username', '').strip()
         if is_locked_out(username):
+            # Audit: log every attempt against an already-locked account.
+            # user_login_failed does NOT fire here because authenticate() is
+            # never called — we short-circuit before form validation.
+            log_event(
+                AuditEvent.LOGIN_LOCKOUT,
+                request=request,
+                user=None,
+                attempted_username=username,
+                reason='account_already_locked',
+            )
             messages.error(
                 request,
                 f'Too many failed login attempts. '
@@ -137,6 +150,18 @@ class UserLoginView(auth_views.LoginView):
 
         if count >= MAX_ATTEMPTS:
             # This attempt triggered the lockout.
+            # Audit: LOGIN_FAILURE was already logged by the user_login_failed
+            # signal (fired inside authenticate()).  Log LOGIN_LOCKOUT separately
+            # to mark the moment the lockout threshold was crossed — the two
+            # records together give investigators the full sequence of events.
+            log_event(
+                AuditEvent.LOGIN_LOCKOUT,
+                request=self.request,
+                user=None,
+                attempted_username=username,
+                reason='threshold_reached',
+                failed_attempts=count,
+            )
             # Render a clean page (no form errors) so the lockout message is
             # unambiguous — showing form errors alongside would be confusing.
             messages.error(
@@ -240,6 +265,14 @@ class UserPasswordChangeView(LoginRequiredMixin, auth_views.PasswordChangeView):
     success_url = reverse_lazy('mupenz_fulgence:dashboard')
 
     def form_valid(self, form):
+        # Audit before calling super() so the request context is still intact.
+        # The new password is stored in form.cleaned_data — we deliberately
+        # do NOT read or log it here.
+        log_event(
+            AuditEvent.PASSWORD_CHANGED,
+            request=self.request,
+            user=self.request.user,
+        )
         messages.success(self.request, 'Your password has been changed successfully.')
         return super().form_valid(form)
 
@@ -501,11 +534,23 @@ class UserPasswordResetView(auth_views.PasswordResetView):
     for unknown addresses, but the HTTP response is identical in both cases,
     making it impossible for an attacker to enumerate registered emails via
     this endpoint.
+
+    Audit note: We log that a reset was *requested* without recording the
+    email address.  Logging the email would (a) create PII records and
+    (b) allow log analysis to reveal which addresses are registered —
+    undermining the anti-enumeration guarantee at the logging layer.
     """
     template_name         = 'mupenz_fulgence/registration/password_reset_form.html'
     email_template_name   = 'mupenz_fulgence/registration/password_reset_email.txt'
     subject_template_name = 'mupenz_fulgence/registration/password_reset_subject.txt'
     success_url           = reverse_lazy('mupenz_fulgence:password_reset_done')
+
+    def form_valid(self, form):
+        # Log the request before super() dispatches the email so the
+        # request object (for IP extraction) is still available.
+        # Deliberately omit the email address — see class docstring.
+        log_event(AuditEvent.PASSWORD_RESET_REQUESTED, request=self.request)
+        return super().form_valid(form)
 
 
 class UserPasswordResetDoneView(auth_views.PasswordResetDoneView):
@@ -538,6 +583,16 @@ class UserPasswordResetConfirmView(auth_views.PasswordResetConfirmView):
     success_url   = reverse_lazy('mupenz_fulgence:password_reset_complete')
 
     def form_valid(self, form):
+        # form.user is the User whose password is being reset (set by
+        # Django's SetPasswordForm.__init__).  Log the completion before
+        # calling super() which saves the new password and invalidates the
+        # token — after that point the token is gone from the session.
+        # We log the user identity but NOT the new password or the token.
+        log_event(
+            AuditEvent.PASSWORD_RESET_COMPLETED,
+            request=self.request,
+            user=form.user,
+        )
         messages.success(
             self.request,
             'Your password has been reset. You can now sign in with your new password.',
