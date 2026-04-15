@@ -1191,3 +1191,310 @@ class BruteForceProtectionTests(TestCase):
         reset_failures('brutetest')
         response = self._post('brutetest', 'StrongPass123!')
         self.assertRedirects(response, self.dashboard_url)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CSRF enforcement
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CSRFEnforcementTests(TestCase):
+    """
+    Verify that Django's CsrfViewMiddleware enforces token validation on every
+    state-changing (POST) endpoint.
+
+    Why a dedicated test class?
+    ───────────────────────────
+    Django's default test Client bypasses CsrfViewMiddleware to simplify
+    writing unit tests.  That convenience means the 106 tests above give no
+    evidence that CSRF protection is actually active at runtime.
+
+    Passing Client(enforce_csrf_checks=True) re-enables the real middleware so
+    these tests exercise the actual protection path.
+
+    Token acquisition pattern:
+    ──────────────────────────
+    1. GET the form page — middleware sets the csrftoken cookie on the client.
+    2. Read self.csrf_client.cookies['csrftoken'].value.
+    3. POST with csrfmiddlewaretoken=<token> in the request body.
+
+    Each test pair:
+      • *_without_csrf   → expects HTTP 403 (token missing from POST body)
+      • *_with_csrf      → expects anything except 403 (token present and valid)
+
+    Security properties verified:
+      - Login endpoint rejects unauthenticated POST without token
+      - Registration rejects POST without token
+      - Logout rejects POST without token (Django 5+ POST-only requirement)
+      - Profile update rejects POST without token
+      - Password change rejects POST without token
+      - Password reset request rejects POST without token
+      - Password reset confirm (set-password form) rejects POST without token
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.user = make_user(
+            username='csrfuser',
+            password='StrongPass123!',
+            email='csrf@example.com',
+        )
+        # All CSRF assertions use this client; the default self.client stays
+        # CSRF-bypassed for setup helpers only.
+        self.csrf_client = Client(enforce_csrf_checks=True)
+
+    def _get_csrf_token(self, url, follow=False):
+        """
+        GET *url* through the CSRF-enforcing client and return the token value
+        that the middleware placed in the csrftoken cookie.
+        """
+        self.csrf_client.get(url, follow=follow)
+        return self.csrf_client.cookies['csrftoken'].value
+
+    def _login_with_csrf(self):
+        """
+        Authenticate through the CSRF-enforcing client using a real form POST.
+        This sets both the session cookie and the CSRF cookie on csrf_client.
+        """
+        login_url = reverse('mupenz_fulgence:login')
+        token = self._get_csrf_token(login_url)
+        self.csrf_client.post(login_url, {
+            'username': 'csrfuser',
+            'password': 'StrongPass123!',
+            'csrfmiddlewaretoken': token,
+        })
+
+    # ── Login ──────────────────────────────────────────────────────────────────
+
+    def test_login_post_without_csrf_returns_403(self):
+        """
+        A login POST that carries no csrfmiddlewaretoken must be rejected.
+        The CSRF cookie is absent as well (cold client, no prior GET).
+        """
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:login'),
+            {'username': 'csrfuser', 'password': 'StrongPass123!'},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_login_post_with_valid_csrf_succeeds(self):
+        """A login POST with a valid CSRF token must not be rejected by middleware."""
+        url = reverse('mupenz_fulgence:login')
+        token = self._get_csrf_token(url)
+        response = self.csrf_client.post(url, {
+            'username': 'csrfuser',
+            'password': 'StrongPass123!',
+            'csrfmiddlewaretoken': token,
+        })
+        # 200 (form error) or 302 (redirect on success) — never 403
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Registration ───────────────────────────────────────────────────────────
+
+    def test_register_post_without_csrf_returns_403(self):
+        """Registration POST without a CSRF token must be blocked."""
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:register'),
+            {
+                'username': 'newcsrfuser',
+                'email': 'new@example.com',
+                'password1': 'StrongPass123!',
+                'password2': 'StrongPass123!',
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_register_post_with_valid_csrf_succeeds(self):
+        url = reverse('mupenz_fulgence:register')
+        token = self._get_csrf_token(url)
+        response = self.csrf_client.post(url, {
+            'username': 'newcsrfuser',
+            'email': 'new@example.com',
+            'password1': 'StrongPass123!',
+            'password2': 'StrongPass123!',
+            'csrfmiddlewaretoken': token,
+        })
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Logout ─────────────────────────────────────────────────────────────────
+
+    def test_logout_post_without_csrf_returns_403(self):
+        """
+        Logout POST without a CSRF token must be blocked.
+        Even an authenticated user cannot log out via a cross-site request.
+
+        Why this matters: a CSRF attack could force a victim's browser to
+        silently log them out, enabling session-fixation follow-on attacks.
+        """
+        self._login_with_csrf()
+        # POST to logout — the CSRF cookie is present (from _login_with_csrf)
+        # but no csrfmiddlewaretoken is included in the body → 403.
+        response = self.csrf_client.post(reverse('mupenz_fulgence:logout'))
+        self.assertEqual(response.status_code, 403)
+
+    def test_logout_post_with_valid_csrf_succeeds(self):
+        self._login_with_csrf()
+        # GET an authenticated page to ensure the CSRF cookie is fresh.
+        token = self._get_csrf_token(reverse('mupenz_fulgence:dashboard'))
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:logout'),
+            {'csrfmiddlewaretoken': token},
+        )
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Profile update ─────────────────────────────────────────────────────────
+
+    def test_profile_post_without_csrf_returns_403(self):
+        """
+        An authenticated profile-update POST without a CSRF token must be blocked.
+        An attacker's page could otherwise silently change the victim's profile.
+        """
+        self._login_with_csrf()
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:profile'),
+            {
+                'first_name': 'Injected',
+                'last_name': 'Name',
+                'email': 'csrf@example.com',
+                'bio': '',
+                'location': '',
+                'birth_date': '',
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_profile_post_with_valid_csrf_succeeds(self):
+        self._login_with_csrf()
+        url = reverse('mupenz_fulgence:profile')
+        token = self._get_csrf_token(url)
+        response = self.csrf_client.post(url, {
+            'first_name': 'Test',
+            'last_name': 'User',
+            'email': 'csrf@example.com',
+            'bio': '',
+            'location': '',
+            'birth_date': '',
+            'csrfmiddlewaretoken': token,
+        })
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Password change ────────────────────────────────────────────────────────
+
+    def test_password_change_post_without_csrf_returns_403(self):
+        """
+        A password-change POST without CSRF token must be blocked.
+        An attacker's page could otherwise force a victim to change their password
+        to an attacker-controlled value, leading to account takeover.
+        """
+        self._login_with_csrf()
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:password_change'),
+            {
+                'old_password': 'StrongPass123!',
+                'new_password1': 'AttackerChose1!',
+                'new_password2': 'AttackerChose1!',
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_password_change_post_with_valid_csrf_succeeds(self):
+        self._login_with_csrf()
+        url = reverse('mupenz_fulgence:password_change')
+        token = self._get_csrf_token(url)
+        response = self.csrf_client.post(url, {
+            'old_password': 'StrongPass123!',
+            'new_password1': 'NewPass456!',
+            'new_password2': 'NewPass456!',
+            'csrfmiddlewaretoken': token,
+        })
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Password reset request ─────────────────────────────────────────────────
+
+    def test_password_reset_post_without_csrf_returns_403(self):
+        """
+        Password-reset request POST without CSRF token must be blocked.
+        Without protection an attacker could trigger reset emails for any
+        address, constituting an email-based denial-of-service.
+        """
+        response = self.csrf_client.post(
+            reverse('mupenz_fulgence:password_reset'),
+            {'email': 'csrf@example.com'},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_password_reset_post_with_valid_csrf_succeeds(self):
+        url = reverse('mupenz_fulgence:password_reset')
+        token = self._get_csrf_token(url)
+        response = self.csrf_client.post(
+            url,
+            {'email': 'csrf@example.com', 'csrfmiddlewaretoken': token},
+        )
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── Password reset confirm (set-password form) ─────────────────────────────
+
+    def test_password_reset_confirm_post_without_csrf_returns_403(self):
+        """
+        The set-password form (Django 3.2+ session-token pattern) must also
+        reject requests without a CSRF token.
+
+        Django's password-reset flow (3.2+):
+          GET /reset/<uid>/<token>/  → validates token, stores in session,
+                                       redirects to /reset/<uid>/set-password/
+          GET /reset/<uid>/set-password/ → renders the new-password form
+          POST /reset/<uid>/set-password/ → sets password (requires CSRF)
+        """
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        # Walk Django's two-step redirect to seed the session and CSRF cookie.
+        confirm_url = reverse(
+            'mupenz_fulgence:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': token},
+        )
+        self.csrf_client.get(confirm_url, follow=True)
+
+        set_pw_url = reverse(
+            'mupenz_fulgence:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': 'set-password'},
+        )
+        # POST without csrfmiddlewaretoken → 403
+        response = self.csrf_client.post(set_pw_url, {
+            'new_password1': 'AttackerChose1!',
+            'new_password2': 'AttackerChose1!',
+        })
+        self.assertEqual(response.status_code, 403)
+        # Confirm the password was NOT changed despite the POST reaching the server
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('StrongPass123!'))
+
+    def test_password_reset_confirm_post_with_valid_csrf_succeeds(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        confirm_url = reverse(
+            'mupenz_fulgence:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': token},
+        )
+        # Follow the redirect — seeds both the session token and the CSRF cookie.
+        self.csrf_client.get(confirm_url, follow=True)
+
+        set_pw_url = reverse(
+            'mupenz_fulgence:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': 'set-password'},
+        )
+        csrf_token = self.csrf_client.cookies['csrftoken'].value
+        response = self.csrf_client.post(set_pw_url, {
+            'new_password1': 'NewPass456!',
+            'new_password2': 'NewPass456!',
+            'csrfmiddlewaretoken': csrf_token,
+        })
+        self.assertNotEqual(response.status_code, 403)
