@@ -1,0 +1,87 @@
+name: UAS Django app task
+description: Create a student assignment to build a complete Django app for the UAS project
+title: "[UAS Django App Task]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to assign a student a complete UAS Django app project.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Learning objective
+      description: Describe what students should learn by completing this task.
+      placeholder: Practice planning, building, documenting, and validating a complete Django app using production-style conventions.
+    validations:
+      required: true
+  - type: textarea
+    id: student-name
+    attributes:
+      label: Student identity and app name
+      description: State the student name and the Django app name that must be derived from it.
+      placeholder: Student name: Jane Doe. Required app name: janedoe or jane_doe.
+    validations:
+      required: true
+  - type: textarea
+    id: requested-feature
+    attributes:
+      label: Requested implementation
+      description: Describe the complete app students should build, including purpose, users, and major workflows.
+      placeholder: Build a complete UAS Django app with models, views, URLs, templates, forms, admin registration, and any supporting business logic needed for the selected domain.
+    validations:
+      required: true
+  - type: textarea
+    id: required-deliverables
+    attributes:
+      label: Required deliverables
+      description: List the artifacts and capabilities that must be included in the submission.
+      placeholder: |
+        - Django app named after the student
+        - Clean URL structure and view organization
+        - Models, forms, templates, and admin integration
+        - Input validation and error handling
+        - Tests and setup instructions
+        - Documentation of design decisions
+    validations:
+      required: true
+  - type: textarea
+    id: engineering-standards
+    attributes:
+      label: Best practices and industry standards
+      description: Describe the technical and quality expectations students must follow.
+      placeholder: |
+        - Follow Django conventions and separation of concerns
+        - Use secure defaults, validation, and CSRF protection
+        - Keep code modular, readable, and maintainable
+        - Reuse settings and patterns already present in the repository
+        - Write tests for the core behavior
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: List the requirements that define a complete solution.
+      placeholder: |
+        - The submitted Django app uses the student's name as the app name
+        - The app is complete, functional, and aligned with the requested domain
+        - Code follows Django best practices and industry-standard structure
+        - Core flows are validated with tests
+        - Existing repository behavior still works
+        - The pull request clearly documents the implementation
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and hints
+      description: Share relevant repository paths, suggested patterns, feature boundaries, or design constraints.
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add references, grading notes, examples, mockups, or classroom instructions.
+    validations:
+      required: false

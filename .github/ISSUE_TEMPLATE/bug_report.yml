@@ -1,0 +1,57 @@
+name: Security bug fix task
+description: Create a student assignment to patch a web security bug
+title: "[Security Bug Task]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to assign students a bug-fix task related to web security.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Learning objective
+      description: Describe what students should learn by completing this task.
+      placeholder: Practice identifying and fixing a security issue in the Django app.
+    validations:
+      required: true
+  - type: textarea
+    id: vulnerability
+    attributes:
+      label: Security topic or vulnerability
+      description: Identify the web security concept involved.
+      placeholder: SQL injection, XSS, CSRF, authentication weakness, insecure headers, or similar.
+    validations:
+      required: true
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current insecure behavior
+      description: Explain the bug or weakness students need to fix.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: List the requirements that define a complete solution.
+      placeholder: |
+        - The vulnerability is removed
+        - Existing behavior still works
+        - The change is explained in the pull request
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and hints
+      description: Share relevant files, routes, components, or hints students should review.
+      placeholder: Mention likely files, endpoints, or setup notes.
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add reproduction details, screenshots, references, or classroom notes.
+    validations:
+      required: false
