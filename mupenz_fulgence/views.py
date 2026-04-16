@@ -381,3 +381,87 @@ class UserProfileDetailView(LoginRequiredMixin, TemplateView):
         context['viewed_user'] = profile.user
         context['viewed_role'] = get_user_role(profile.user)
         return context
+
+
+# ---------------------------------------------------------------------------
+# Password Reset — thin wrappers around Django's built-in auth views
+#
+# Security rationale
+# ──────────────────
+# Django's PasswordResetTokenGenerator produces HMAC-SHA256 tokens whose
+# inputs include: user pk, password hash, last-login timestamp, and a
+# seconds-since-epoch value (for expiry).  Consequences:
+#
+#   • Forgery-resistant   — an attacker who knows only the uidb64 cannot
+#                           construct a valid token without the SECRET_KEY.
+#   • Single-use          — the password hash changes on reset, so the old
+#                           token becomes invalid immediately.
+#   • Time-limited        — PASSWORD_RESET_TIMEOUT (1 h here) caps the
+#                           validity window even if the token is not used.
+#   • Referer-safe        — Django 3.2+ stores the real token in the session
+#                           and redirects to a /set-password/ URL, so the
+#                           one-time token never appears in the Referer
+#                           header when the confirmation form is submitted.
+#   • Anti-enumeration    — PasswordResetView always redirects to the "done"
+#                           page, whether or not the email matches an account.
+#                           No branch in the response reveals account existence.
+# ---------------------------------------------------------------------------
+
+class UserPasswordResetView(auth_views.PasswordResetView):
+    """
+    Step 1 — User submits their email address to request a reset link.
+
+    Anti-enumeration guarantee: Django's implementation unconditionally
+    redirects to success_url after the form is submitted.  No email is sent
+    for unknown addresses, but the HTTP response is identical in both cases,
+    making it impossible for an attacker to enumerate registered emails via
+    this endpoint.
+    """
+    template_name         = 'mupenz_fulgence/registration/password_reset_form.html'
+    email_template_name   = 'mupenz_fulgence/registration/password_reset_email.txt'
+    subject_template_name = 'mupenz_fulgence/registration/password_reset_subject.txt'
+    success_url           = reverse_lazy('mupenz_fulgence:password_reset_done')
+
+
+class UserPasswordResetDoneView(auth_views.PasswordResetDoneView):
+    """
+    Step 2 — Generic "check your inbox" confirmation page.
+
+    The message shown is intentionally vague: it never confirms whether the
+    submitted address belongs to a registered account.
+    """
+    template_name = 'mupenz_fulgence/registration/password_reset_done.html'
+
+
+class UserPasswordResetConfirmView(auth_views.PasswordResetConfirmView):
+    """
+    Step 3 — User arrives via the emailed link and sets a new password.
+
+    Token validation flow (Django 3.2+):
+      GET  /reset/<uidb64>/<real-token>/
+          → validates token, stores it in session, redirects to
+            /reset/<uidb64>/set-password/    (token no longer in URL)
+      GET  /reset/<uidb64>/set-password/
+          → renders the new-password form (context: validlink=True)
+      POST /reset/<uidb64>/set-password/
+          → saves password, invalidates token, redirects to complete page
+
+    Invalid or expired tokens skip the redirect and render this template
+    immediately with validlink=False, showing a clear error message.
+    """
+    template_name = 'mupenz_fulgence/registration/password_reset_confirm.html'
+    success_url   = reverse_lazy('mupenz_fulgence:password_reset_complete')
+
+    def form_valid(self, form):
+        messages.success(
+            self.request,
+            'Your password has been reset. You can now sign in with your new password.',
+        )
+        return super().form_valid(form)
+
+
+class UserPasswordResetCompleteView(auth_views.PasswordResetCompleteView):
+    """
+    Step 4 — Final confirmation page; directs the user back to the login page.
+    """
+    template_name = 'mupenz_fulgence/registration/password_reset_complete.html'

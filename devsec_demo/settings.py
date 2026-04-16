@@ -131,3 +131,20 @@ STATIC_URL = 'static/'
 LOGIN_REDIRECT_URL = '/auth/'
 LOGOUT_REDIRECT_URL = '/auth/login/'
 LOGIN_URL = '/auth/login/'
+
+# ── Email ──────────────────────────────────────────────────────────────────
+# Development default: print emails to the console (no SMTP server needed).
+# In production set DJANGO_EMAIL_BACKEND to an SMTP or transactional backend
+# and supply DJANGO_DEFAULT_FROM_EMAIL with a deliverable address.
+EMAIL_BACKEND = os.environ.get(
+    'DJANGO_EMAIL_BACKEND',
+    'django.core.mail.backends.console.EmailBackend',
+)
+DEFAULT_FROM_EMAIL = os.environ.get('DJANGO_DEFAULT_FROM_EMAIL', 'noreply@mf-auth.local')
+
+# ── Password reset token validity ─────────────────────────────────────────
+# Number of seconds a password-reset link remains valid (default Django: 3 days).
+# Reducing to 1 hour limits the window during which an intercepted link is
+# exploitable.  The token is also single-use — it becomes invalid the moment
+# the password is changed (because the HMAC input includes the password hash).
+PASSWORD_RESET_TIMEOUT = 3600  # 1 hour

@@ -10,6 +10,24 @@ urlpatterns = [
     path('login/',    views.UserLoginView.as_view(),   name='login'),
     path('logout/',   views.UserLogoutView.as_view(),  name='logout'),
 
+    # ── Password reset (public — unauthenticated users) ───────────────────────
+    # Step 1: request form
+    path('password-reset/',
+         views.UserPasswordResetView.as_view(),
+         name='password_reset'),
+    # Step 2: "check your inbox" confirmation
+    path('password-reset/done/',
+         views.UserPasswordResetDoneView.as_view(),
+         name='password_reset_done'),
+    # Step 3: new-password form (token from emailed link)
+    path('reset/<uidb64>/<token>/',
+         views.UserPasswordResetConfirmView.as_view(),
+         name='password_reset_confirm'),
+    # Step 4: success page after password saved
+    path('reset/done/',
+         views.UserPasswordResetCompleteView.as_view(),
+         name='password_reset_complete'),
+
     # ── Authenticated users ───────────────────────────────────────────────────
     path('',                  views.DashboardView.as_view(),          name='dashboard'),
     path('profile/',          views.ProfileView.as_view(),            name='profile'),

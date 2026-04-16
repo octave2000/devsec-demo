@@ -8,10 +8,16 @@ Coverage:
   - Profile update
   - Password change (success, wrong current password, new-password mismatch)
   - RBAC: anonymous, user, instructor, staff, admin access matrix
+  - IDOR / Broken Access Control: profile detail access by pk
+  - Password reset: full flow, anti-enumeration, invalid tokens, validation
 """
 from django.contrib.auth.models import Group, User
+from django.contrib.auth.tokens import default_token_generator
+from django.core import mail
 from django.test import Client, TestCase
 from django.urls import reverse
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 
 from .models import Profile
 from .rbac import get_user_role
@@ -779,3 +785,238 @@ class IDORTests(TestCase):
         self.client.login(username='staff_user', password='StrongPass123!')
         response = self.client.get(self._url(self.attacker_profile.pk))
         self.assertEqual(response.context['viewed_user'], self.attacker)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Password Reset workflow
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PasswordResetTests(TestCase):
+    """
+    Tests for the secure password reset workflow.
+
+    Django's test runner calls setup_test_environment() which replaces the
+    configured EMAIL_BACKEND with django.core.mail.backends.locmem.EmailBackend,
+    so mail.outbox captures all sent messages without any SMTP configuration.
+
+    Security properties verified:
+      - Anti-enumeration: known and unknown emails produce identical HTTP responses
+      - No email sent for non-existent addresses (silent failure)
+      - Valid token opens the confirm form (validlink=True in context)
+      - Invalid / tampered token renders validlink=False without raising an error
+      - Full flow: valid token → new password accepted → redirects to complete
+      - Password mismatch rejected; original password unchanged
+      - Password validation rules enforced (e.g. too-short password)
+    """
+
+    def setUp(self):
+        self.client       = Client()
+        self.user         = make_user(username='resetuser', email='reset@example.com')
+        self.reset_url    = reverse('mupenz_fulgence:password_reset')
+        self.done_url     = reverse('mupenz_fulgence:password_reset_done')
+        self.complete_url = reverse('mupenz_fulgence:password_reset_complete')
+
+    # ── Helper ────────────────────────────────────────────────────────────────
+
+    def _confirm_url(self, user=None):
+        """Return the initial token URL for *user* (defaults to self.user)."""
+        u = user or self.user
+        uid   = urlsafe_base64_encode(force_bytes(u.pk))
+        token = default_token_generator.make_token(u)
+        return reverse('mupenz_fulgence:password_reset_confirm',
+                       kwargs={'uidb64': uid, 'token': token})
+
+    def _set_password_url(self, user=None):
+        """
+        Return the session-secured /set-password/ URL by first GETting the
+        real token URL (which stores the token in the session and redirects).
+        """
+        url = self._confirm_url(user)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 302,
+                         'Expected redirect to set-password URL after valid token GET')
+        return response['Location']
+
+    # ── Page rendering ────────────────────────────────────────────────────────
+
+    def test_reset_form_page_renders(self):
+        response = self.client.get(self.reset_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(
+            response, 'mupenz_fulgence/registration/password_reset_form.html'
+        )
+
+    def test_done_page_renders(self):
+        response = self.client.get(self.done_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(
+            response, 'mupenz_fulgence/registration/password_reset_done.html'
+        )
+
+    def test_complete_page_renders(self):
+        response = self.client.get(self.complete_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(
+            response, 'mupenz_fulgence/registration/password_reset_complete.html'
+        )
+
+    # ── Anti-enumeration ──────────────────────────────────────────────────────
+
+    def test_known_email_redirects_to_done(self):
+        """A registered email redirects to the done page — no extra information."""
+        response = self.client.post(self.reset_url, {'email': 'reset@example.com'})
+        self.assertRedirects(response, self.done_url)
+
+    def test_unknown_email_also_redirects_to_done(self):
+        """
+        Anti-enumeration: an unregistered email must produce the identical
+        HTTP 302 → done redirect as a registered email.
+        An attacker observing only the HTTP response cannot distinguish the two.
+        """
+        response = self.client.post(self.reset_url, {'email': 'nobody@example.com'})
+        self.assertRedirects(response, self.done_url)
+
+    def test_email_sent_for_known_address(self):
+        """Exactly one email must be dispatched for a registered address."""
+        self.client.post(self.reset_url, {'email': 'reset@example.com'})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('reset@example.com', mail.outbox[0].to)
+
+    def test_no_email_sent_for_unknown_address(self):
+        """
+        No email must be sent when the address is not registered.
+        Sending an email would confirm (to an observer of the inbox) that the
+        address IS registered — this silent failure prevents that leak.
+        """
+        self.client.post(self.reset_url, {'email': 'nobody@example.com'})
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_email_contains_reset_link(self):
+        """The dispatched email body must contain a usable reset URL."""
+        self.client.post(self.reset_url, {'email': 'reset@example.com'})
+        self.assertEqual(len(mail.outbox), 1)
+        body = mail.outbox[0].body
+        # The email template renders {% url 'password_reset_confirm' uid token %}
+        # to the actual path, e.g. /auth/reset/<uidb64>/<token>/
+        self.assertIn('/reset/', body)
+
+    # ── Token validation ──────────────────────────────────────────────────────
+
+    def test_valid_token_redirects_to_set_password(self):
+        """
+        A valid token URL must redirect to the session-secured /set-password/
+        URL (Django 3.2+ Referer-safe redirect pattern).
+        """
+        response = self.client.get(self._confirm_url())
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('set-password', response['Location'])
+
+    def test_valid_token_shows_confirm_form(self):
+        """After the redirect, the confirm page must render with validlink=True."""
+        set_pw_url = self._set_password_url()
+        response   = self.client.get(set_pw_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(
+            response, 'mupenz_fulgence/registration/password_reset_confirm.html'
+        )
+        self.assertTrue(response.context['validlink'])
+
+    def test_invalid_token_renders_confirm_template_with_validlink_false(self):
+        """
+        A tampered or expired token must render the confirm template with
+        validlink=False.  It must NOT raise an exception or return a 500.
+        """
+        url = reverse('mupenz_fulgence:password_reset_confirm',
+                      kwargs={'uidb64': 'aW52YWxpZA', 'token': 'bad-token'})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(
+            response, 'mupenz_fulgence/registration/password_reset_confirm.html'
+        )
+        self.assertFalse(response.context['validlink'])
+
+    def test_tampered_uid_renders_invalid_link(self):
+        """A completely invalid uidb64 must also yield validlink=False."""
+        url = reverse('mupenz_fulgence:password_reset_confirm',
+                      kwargs={'uidb64': 'ZZZZZZZZZZ', 'token': 'some-token'})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['validlink'])
+
+    # ── Full reset flow ───────────────────────────────────────────────────────
+
+    def test_full_flow_resets_password_and_redirects(self):
+        """
+        End-to-end: valid token → set new password → redirect to complete page.
+        Verifies that the password is actually persisted in the database.
+        """
+        set_pw_url = self._set_password_url()
+        response   = self.client.post(set_pw_url, {
+            'new_password1': 'BrandNewPass123!',
+            'new_password2': 'BrandNewPass123!',
+        })
+        self.assertRedirects(response, self.complete_url)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('BrandNewPass123!'))
+
+    def test_full_flow_token_invalidated_after_use(self):
+        """
+        Once the password is reset the original token must be invalid.
+        The HMAC input includes the password hash, so changing the password
+        automatically invalidates all prior tokens.
+        """
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+
+        # Use the token to reset the password
+        self.client.get(self._confirm_url())
+        set_pw_url = reverse('mupenz_fulgence:password_reset_confirm',
+                             kwargs={'uidb64': uid, 'token': 'set-password'})
+        self.client.post(set_pw_url, {
+            'new_password1': 'BrandNewPass123!',
+            'new_password2': 'BrandNewPass123!',
+        })
+        self.user.refresh_from_db()
+
+        # The original token must now be invalid
+        self.assertFalse(default_token_generator.check_token(self.user, token))
+
+    # ── Password validation ───────────────────────────────────────────────────
+
+    def test_password_mismatch_rejected(self):
+        """Mismatched confirmation must return the form with an error."""
+        set_pw_url = self._set_password_url()
+        response   = self.client.post(set_pw_url, {
+            'new_password1': 'BrandNewPass123!',
+            'new_password2': 'DoesNotMatch456!',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('new_password2', response.context['form'].errors)
+        # Original password must be unchanged
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('StrongPass123!'))
+
+    def test_weak_password_rejected(self):
+        """
+        Django's AUTH_PASSWORD_VALIDATORS must block a too-short password.
+        This verifies that password strength rules are enforced on the reset
+        path, not just on registration.
+        """
+        set_pw_url = self._set_password_url()
+        response   = self.client.post(set_pw_url, {
+            'new_password1': 'short',
+            'new_password2': 'short',
+        })
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        # Original password must be unchanged
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('StrongPass123!'))
+
+    # ── Login page integration ────────────────────────────────────────────────
+
+    def test_login_page_has_forgot_password_link(self):
+        """The login page must contain a visible link to the reset request page."""
+        response = self.client.get(reverse('mupenz_fulgence:login'))
+        self.assertContains(response, reverse('mupenz_fulgence:password_reset'))
