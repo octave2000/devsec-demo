@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import django; django.setup\\(\\); import inspect; from django.contrib.auth import views as auth_views; print\\(inspect.getsource\\(auth_views.LoginView.get_redirect_url\\)\\); print\\('---'\\); print\\(inspect.getsource\\(auth_views.LogoutView.get_next_page\\)\\)\")",
-      "Bash(python manage.py test mupenz_fulgence --verbosity=1)"
-    ]
-  }
-}
