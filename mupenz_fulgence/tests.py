@@ -645,3 +645,137 @@ class PrivilegeEscalationTests(TestCase):
         self.assertEqual(
             response.context['form'].instance.user, self.user
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IDOR / Broken Access Control — UserProfileDetailView
+# ──────────────────────────────────────────────────────────────────────────────
+
+class IDORTests(TestCase):
+    """
+    Security tests for Insecure Direct Object Reference (IDOR) on the
+    profile detail endpoint (/auth/users/<pk>/profile/).
+
+    Validates that:
+      - Regular users get HTTP 404 (not 403) when accessing another user's pk.
+        (404 hides object existence; 403 would confirm the pk is valid.)
+      - Regular users can access their own profile by pk → HTTP 200.
+      - Staff / admins can access any profile → HTTP 200.
+      - Anonymous users are redirected to the login page.
+      - A completely nonexistent pk returns 404 for all role levels.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.owner    = make_user(username='profile_owner',  email='owner@example.com')
+        self.attacker = make_user(username='attacker_user',  email='attack@example.com')
+        self.staff    = make_staff_user()
+        self.admin    = make_admin_user()
+        # Profiles are auto-created by signal
+        self.owner_profile    = Profile.objects.get(user=self.owner)
+        self.attacker_profile = Profile.objects.get(user=self.attacker)
+        self.login_url        = reverse('mupenz_fulgence:login')
+
+    def _url(self, pk):
+        return reverse('mupenz_fulgence:user_profile_detail', kwargs={'pk': pk})
+
+    # ── Anonymous ──────────────────────────────────────────────────────────────
+
+    def test_anonymous_redirected_to_login(self):
+        url = self._url(self.owner_profile.pk)
+        response = self.client.get(url)
+        self.assertRedirects(response, f'{self.login_url}?next={url}')
+
+    # ── Regular user — own profile ─────────────────────────────────────────────
+
+    def test_user_can_view_own_profile_by_pk(self):
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile.pk))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'mupenz_fulgence/user_profile_detail.html')
+        self.assertEqual(response.context['viewed_user'], self.owner)
+
+    # ── IDOR: regular user accessing another user's profile ───────────────────
+
+    def test_cross_user_profile_returns_404_not_403(self):
+        """
+        IDOR fix: a regular user requesting another user's profile pk must
+        receive HTTP 404, NOT 403.  Returning 403 would confirm the pk exists
+        (existence leak); 404 is indistinguishable from 'not found'.
+        """
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response = self.client.get(self._url(self.attacker_profile.pk))
+        self.assertEqual(response.status_code, 404)
+
+    def test_existence_leak_prevented(self):
+        """
+        Both an existing-but-foreign profile pk and a wholly nonexistent pk
+        must return 404 so the attacker cannot distinguish the two cases.
+        """
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response_foreign     = self.client.get(self._url(self.attacker_profile.pk))
+        response_nonexistent = self.client.get(self._url(99999))
+        self.assertEqual(response_foreign.status_code, 404)
+        self.assertEqual(response_nonexistent.status_code, 404)
+
+    def test_cross_user_post_returns_405(self):
+        """
+        The detail view is read-only (GET only via TemplateView).
+        A POST to a foreign pk must not modify any data.
+        """
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response = self.client.post(self._url(self.attacker_profile.pk), {
+            'bio': 'injected', 'location': 'injected',
+        })
+        # TemplateView does not accept POST — returns 405 Method Not Allowed
+        self.assertEqual(response.status_code, 405)
+        # Verify attacker's bio is unmodified
+        self.attacker_profile.refresh_from_db()
+        self.assertNotEqual(self.attacker_profile.bio, 'injected')
+
+    # ── Staff access (legitimate) ─────────────────────────────────────────────
+
+    def test_staff_can_access_any_profile(self):
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile.pk))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['viewed_user'], self.owner)
+
+    def test_staff_can_access_attacker_profile(self):
+        """Staff can view every profile, including the attacker's."""
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.attacker_profile.pk))
+        self.assertEqual(response.status_code, 200)
+
+    def test_admin_can_access_any_profile(self):
+        self.client.login(username='admin_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile.pk))
+        self.assertEqual(response.status_code, 200)
+
+    # ── Nonexistent pk ────────────────────────────────────────────────────────
+
+    def test_nonexistent_pk_returns_404_for_regular_user(self):
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response = self.client.get(self._url(99999))
+        self.assertEqual(response.status_code, 404)
+
+    def test_nonexistent_pk_returns_404_for_staff(self):
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(99999))
+        self.assertEqual(response.status_code, 404)
+
+    # ── Context integrity ─────────────────────────────────────────────────────
+
+    def test_context_contains_viewed_role(self):
+        """viewed_role must be present and correct in the template context."""
+        self.client.login(username='profile_owner', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile.pk))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('viewed_role', response.context)
+        self.assertEqual(response.context['viewed_role'], 'user')
+
+    def test_staff_context_shows_correct_viewed_user(self):
+        """When staff views a profile, viewed_user must be the profile owner."""
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.attacker_profile.pk))
+        self.assertEqual(response.context['viewed_user'], self.attacker)
