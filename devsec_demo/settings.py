@@ -20,32 +20,14 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# ── Environment detection ──────────────────────────────────────────────────
-# DJANGO_DEBUG must be explicitly set to the string "True" to enable debug
-# mode.  Any other value (including absence) results in DEBUG=False, which
-# is the correct default for production.
-#
-# WHY: Django's own docs warn "never deploy a site into production with
-# DEBUG turned on."  DEBUG=True leaks stack traces, SQL queries, and local
-# variables to any browser that triggers an error.
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
 
-# ── Secret key ────────────────────────────────────────────────────────────
-# The secret key signs sessions, CSRF tokens, password-reset links, and
-# other security-sensitive data.  Exposure or predictability of this value
-# compromises all of those mechanisms simultaneously.
-#
-# Production  : DJANGO_SECRET_KEY MUST be set in the environment.
-#               If it is absent, startup fails loudly — a silent None would
-#               make the app appear to work while accepting forged tokens.
-# Development : If not set, a well-marked insecure fallback is used so
-#               local dev works out of the box without touching .env.
+
 _secret_key_env = os.environ.get('DJANGO_SECRET_KEY', '').strip()
 if not _secret_key_env:
     if DEBUG:
-        # Insecure development-only fallback — deliberately ugly so it is
-        # never accidentally used in a production deployment.
+        
         _secret_key_env = (
             'django-insecure-DEV-ONLY-do-not-use-in-production-00000000000000'
         )
@@ -60,18 +42,7 @@ if not _secret_key_env:
 SECRET_KEY = _secret_key_env
 
 
-# ── Allowed hosts ─────────────────────────────────────────────────────────
-# ALLOWED_HOSTS guards against HTTP Host header injection attacks.
-#
-# Production  : Set DJANGO_ALLOWED_HOSTS to a comma-separated list of the
-#               domains / IP addresses that will receive traffic
-#               (e.g. "example.com,www.example.com").  A wildcard ("*") is
-#               explicitly rejected because it defeats the protection.
-# Development : Falls back to localhost/loopback only.
-#
-# WHY no wildcard: an attacker who can forge the Host header can poison
-# password-reset links and cache-poisoning attacks; explicit hosts prevent
-# this entirely.
+
 _allowed_hosts_env = os.environ.get('DJANGO_ALLOWED_HOSTS', '').strip()
 if _allowed_hosts_env:
     ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
@@ -81,7 +52,7 @@ if _allowed_hosts_env:
             "Specify explicit hostnames instead."
         )
 elif DEBUG:
-    # Safe localhost-only defaults for local development
+    
     ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
 else:
     raise ImproperlyConfigured(
@@ -100,7 +71,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
-    # User Authentication Service
     'mupenz_fulgence',
 ]
 
@@ -137,15 +107,7 @@ WSGI_APPLICATION = 'devsec_demo.wsgi.application'
 
 
 # ── Database ───────────────────────────────────────────────────────────────
-# Credentials are read from environment variables — never hardcoded.
-#
-# Development default: SQLite (zero-configuration, single file).
-# Production recommendation: PostgreSQL or MySQL.
-#   Set DJANGO_DB_ENGINE, DJANGO_DB_NAME, DJANGO_DB_USER, DJANGO_DB_PASSWORD,
-#   DJANGO_DB_HOST, and DJANGO_DB_PORT as needed.
-#
-# WHY: Hardcoded database passwords in source code are exposed to anyone
-# with repository access (current or historical), including after rotation.
+
 DATABASES = {
     'default': {
         'ENGINE': os.environ.get(
