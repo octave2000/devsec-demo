@@ -1756,3 +1756,417 @@ class SafeRedirectUrlTests(TestCase):
         """Callers can override the default fallback per call-site."""
         result = self._safe('http://evil.com/', fallback='/custom/landing/')
         self.assertEqual(result, '/custom/landing/')
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audit logging
+# ──────────────────────────────────────────────────────────────────────────────
+
+class AuditLoggingTests(TestCase):
+    """
+    Verify that security-relevant events produce structured audit log records
+    and that no sensitive data (passwords, tokens) leaks into those records.
+
+    Technique: assertLogs('mupenz_fulgence.audit', level='INFO')
+    ─────────────────────────────────────────────────────────────
+    Django's assertLogs context manager temporarily installs a capturing
+    handler on the named logger.  It provides cm.output — a list of strings
+    formatted as 'LEVEL:logger_name:message' — and raises AssertionError if
+    the block emits no records at all.
+
+    This technique exercises the real logging path (signals, log_event,
+    logger) without writing to disk or requiring any LOGGING configuration
+    in the test runner.
+
+    Why signals fire in tests
+    ─────────────────────────
+    AppConfig.ready() imports mupenz_fulgence.signals, connecting all
+    @receiver decorators before the test runner starts.  The test client's
+    POST to the login endpoint calls auth.login() which dispatches
+    user_logged_in — so signal-based log entries are captured normally.
+    """
+
+    AUDIT_LOGGER  = 'mupenz_fulgence.audit'
+    PASSWORD      = 'AuditPass123!'
+    NEW_PASSWORD  = 'NewAuditPass456!'
+    RESET_PASSWORD = 'ResetAuditPass789!'
+
+    def setUp(self):
+        cache.clear()
+        self.client   = Client()
+        self.user     = make_user(
+            username='audituser',
+            password=self.PASSWORD,
+            email='audit@example.com',
+        )
+        self.login_url    = reverse('mupenz_fulgence:login')
+        self.logout_url   = reverse('mupenz_fulgence:logout')
+
+    def _do_login(self):
+        """Authenticate audituser via the test client."""
+        self.client.post(self.login_url, {
+            'username': 'audituser',
+            'password': self.PASSWORD,
+        })
+
+    def _assert_event_logged(self, log_output, event_type):
+        """Assert that at least one record contains *event_type*."""
+        self.assertTrue(
+            any(event_type in msg for msg in log_output),
+            f'Expected event {event_type!r} not found in audit log output:\n'
+            + '\n'.join(log_output),
+        )
+
+    def _assert_no_sensitive_value(self, log_output, *values):
+        """Assert that none of *values* appear literally in any log record."""
+        for msg in log_output:
+            for val in values:
+                self.assertNotIn(
+                    val, msg,
+                    f'Sensitive value {val!r} found in audit log record:\n{msg}',
+                )
+
+    # ── Registration ───────────────────────────────────────────────────────────
+
+    def test_register_success_is_logged(self):
+        """A successful registration must produce a REGISTER_SUCCESS record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:register'), {
+                'username': 'newaudituser',
+                'email': 'newaudit@example.com',
+                'password1': self.PASSWORD,
+                'password2': self.PASSWORD,
+            })
+        self._assert_event_logged(cm.output, 'REGISTER_SUCCESS')
+
+    def test_register_log_contains_username(self):
+        """The REGISTER_SUCCESS record must include the new account's username."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:register'), {
+                'username': 'newaudituser',
+                'email': 'newaudit@example.com',
+                'password1': self.PASSWORD,
+                'password2': self.PASSWORD,
+            })
+        entries = [m for m in cm.output if 'REGISTER_SUCCESS' in m]
+        self.assertTrue(any('newaudituser' in e for e in entries))
+
+    def test_register_log_has_no_password(self):
+        """Registration must not log the chosen password."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:register'), {
+                'username': 'newaudituser',
+                'email': 'newaudit@example.com',
+                'password1': self.PASSWORD,
+                'password2': self.PASSWORD,
+            })
+        self._assert_no_sensitive_value(cm.output, self.PASSWORD)
+
+    # ── Login success ──────────────────────────────────────────────────────────
+
+    def test_login_success_is_logged(self):
+        """Successful authentication must produce a LOGIN_SUCCESS record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self._do_login()
+        self._assert_event_logged(cm.output, 'LOGIN_SUCCESS')
+
+    def test_login_success_log_contains_username(self):
+        """The LOGIN_SUCCESS record must identify the authenticated user."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self._do_login()
+        entries = [m for m in cm.output if 'LOGIN_SUCCESS' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    def test_login_success_log_contains_ip(self):
+        """The LOGIN_SUCCESS record must include the client IP address."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self._do_login()
+        entries = [m for m in cm.output if 'LOGIN_SUCCESS' in m]
+        self.assertTrue(any('ip=' in e for e in entries))
+
+    def test_login_success_log_has_no_password(self):
+        """Successful login must not log the submitted password."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self._do_login()
+        self._assert_no_sensitive_value(cm.output, self.PASSWORD)
+
+    # ── Login failure ──────────────────────────────────────────────────────────
+
+    def test_login_failure_is_logged(self):
+        """A failed login attempt must produce a LOGIN_FAILURE record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.login_url, {
+                'username': 'audituser',
+                'password': 'TOTALLY_WRONG_VALUE',
+            })
+        self._assert_event_logged(cm.output, 'LOGIN_FAILURE')
+
+    def test_login_failure_log_contains_attempted_username(self):
+        """The LOGIN_FAILURE record must include the attempted username."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.login_url, {
+                'username': 'audituser',
+                'password': 'TOTALLY_WRONG_VALUE',
+            })
+        entries = [m for m in cm.output if 'LOGIN_FAILURE' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    def test_login_failure_log_has_no_wrong_password(self):
+        """
+        A failed-login log record must not contain the submitted wrong password.
+        Django redacts it in the signal, but we verify our log is also clean.
+        """
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.login_url, {
+                'username': 'audituser',
+                'password': 'TOTALLY_WRONG_VALUE',
+            })
+        self._assert_no_sensitive_value(cm.output, 'TOTALLY_WRONG_VALUE')
+
+    # ── Logout ─────────────────────────────────────────────────────────────────
+
+    def test_logout_is_logged(self):
+        """A logout action must produce a LOGOUT record."""
+        self._do_login()
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.logout_url)
+        self._assert_event_logged(cm.output, 'LOGOUT')
+
+    def test_logout_log_contains_username(self):
+        """The LOGOUT record must identify who logged out."""
+        self._do_login()
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.logout_url)
+        entries = [m for m in cm.output if 'LOGOUT' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    # ── Login lockout ──────────────────────────────────────────────────────────
+
+    def test_lockout_trigger_is_logged(self):
+        """
+        When the failure counter reaches MAX_ATTEMPTS the triggering
+        request must produce a LOGIN_LOCKOUT record (in addition to the
+        LOGIN_FAILURE record that fires for every failed attempt).
+        """
+        from mupenz_fulgence.login_protection import MAX_ATTEMPTS
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            for _ in range(MAX_ATTEMPTS):
+                self.client.post(self.login_url, {
+                    'username': 'audituser',
+                    'password': 'WRONG_PASSWORD',
+                })
+        self._assert_event_logged(cm.output, 'LOGIN_LOCKOUT')
+
+    def test_locked_account_attempt_is_logged(self):
+        """
+        A login attempt against an *already-locked* account must produce a
+        LOGIN_LOCKOUT record even though authenticate() is never called
+        (so user_login_failed does NOT fire).
+        """
+        from mupenz_fulgence.login_protection import MAX_ATTEMPTS, record_failure
+        for _ in range(MAX_ATTEMPTS):
+            record_failure('audituser')
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.login_url, {
+                'username': 'audituser',
+                'password': self.PASSWORD,   # correct password — still blocked
+            })
+        self._assert_event_logged(cm.output, 'LOGIN_LOCKOUT')
+
+    # ── Password change ────────────────────────────────────────────────────────
+
+    def test_password_change_is_logged(self):
+        """A successful password change must produce a PASSWORD_CHANGED record."""
+        self._do_login()
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_change'), {
+                'old_password': self.PASSWORD,
+                'new_password1': self.NEW_PASSWORD,
+                'new_password2': self.NEW_PASSWORD,
+            })
+        self._assert_event_logged(cm.output, 'PASSWORD_CHANGED')
+
+    def test_password_change_log_contains_username(self):
+        """The PASSWORD_CHANGED record must identify the user."""
+        self._do_login()
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_change'), {
+                'old_password': self.PASSWORD,
+                'new_password1': self.NEW_PASSWORD,
+                'new_password2': self.NEW_PASSWORD,
+            })
+        entries = [m for m in cm.output if 'PASSWORD_CHANGED' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    def test_password_change_log_has_no_passwords(self):
+        """Neither the old nor the new password must appear in the log."""
+        self._do_login()
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_change'), {
+                'old_password': self.PASSWORD,
+                'new_password1': self.NEW_PASSWORD,
+                'new_password2': self.NEW_PASSWORD,
+            })
+        self._assert_no_sensitive_value(cm.output, self.PASSWORD, self.NEW_PASSWORD)
+
+    # ── Password reset request ─────────────────────────────────────────────────
+
+    def test_password_reset_request_is_logged(self):
+        """Submitting the reset-request form must produce a PASSWORD_RESET_REQUESTED record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_reset'), {
+                'email': 'audit@example.com',
+            })
+        self._assert_event_logged(cm.output, 'PASSWORD_RESET_REQUESTED')
+
+    def test_password_reset_request_log_has_no_email(self):
+        """
+        The reset-request log must NOT contain the submitted email address.
+        Logging the email would undermine the anti-enumeration guarantee
+        and create unnecessary PII records.
+        """
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_reset'), {
+                'email': 'audit@example.com',
+            })
+        entries = [m for m in cm.output if 'PASSWORD_RESET_REQUESTED' in m]
+        for entry in entries:
+            self.assertNotIn('audit@example.com', entry)
+
+    def test_password_reset_request_log_has_ip(self):
+        """The reset-request record must include the client IP."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(reverse('mupenz_fulgence:password_reset'), {
+                'email': 'audit@example.com',
+            })
+        entries = [m for m in cm.output if 'PASSWORD_RESET_REQUESTED' in m]
+        self.assertTrue(any('ip=' in e for e in entries))
+
+    # ── Password reset completion ──────────────────────────────────────────────
+
+    def test_password_reset_completion_is_logged(self):
+        """Completing a password reset must produce a PASSWORD_RESET_COMPLETED record."""
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+        # GET validates the token and stores it in the session.
+        self.client.get(reverse('mupenz_fulgence:password_reset_confirm',
+                                kwargs={'uidb64': uid, 'token': token}))
+        set_pw_url = reverse('mupenz_fulgence:password_reset_confirm',
+                             kwargs={'uidb64': uid, 'token': 'set-password'})
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(set_pw_url, {
+                'new_password1': self.RESET_PASSWORD,
+                'new_password2': self.RESET_PASSWORD,
+            })
+        self._assert_event_logged(cm.output, 'PASSWORD_RESET_COMPLETED')
+
+    def test_password_reset_completion_log_contains_username(self):
+        """The PASSWORD_RESET_COMPLETED record must identify the user."""
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+        self.client.get(reverse('mupenz_fulgence:password_reset_confirm',
+                                kwargs={'uidb64': uid, 'token': token}))
+        set_pw_url = reverse('mupenz_fulgence:password_reset_confirm',
+                             kwargs={'uidb64': uid, 'token': 'set-password'})
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(set_pw_url, {
+                'new_password1': self.RESET_PASSWORD,
+                'new_password2': self.RESET_PASSWORD,
+            })
+        entries = [m for m in cm.output if 'PASSWORD_RESET_COMPLETED' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    def test_password_reset_completion_log_has_no_token_or_password(self):
+        """
+        The reset-completion log must contain neither the one-time token nor
+        the newly chosen password.
+        """
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid   = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+        self.client.get(reverse('mupenz_fulgence:password_reset_confirm',
+                                kwargs={'uidb64': uid, 'token': token}))
+        set_pw_url = reverse('mupenz_fulgence:password_reset_confirm',
+                             kwargs={'uidb64': uid, 'token': 'set-password'})
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(set_pw_url, {
+                'new_password1': self.RESET_PASSWORD,
+                'new_password2': self.RESET_PASSWORD,
+            })
+        self._assert_no_sensitive_value(cm.output, token, self.RESET_PASSWORD)
+
+    # ── Role / group changes ───────────────────────────────────────────────────
+
+    def test_role_grant_is_logged(self):
+        """Adding a user to a group must produce a ROLE_GRANTED record."""
+        group, _ = Group.objects.get_or_create(name='Instructor')
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.user.groups.add(group)
+        self._assert_event_logged(cm.output, 'ROLE_GRANTED')
+
+    def test_role_revoke_is_logged(self):
+        """Removing a user from a group must produce a ROLE_REVOKED record."""
+        group, _ = Group.objects.get_or_create(name='Instructor')
+        self.user.groups.add(group)
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.user.groups.remove(group)
+        self._assert_event_logged(cm.output, 'ROLE_REVOKED')
+
+    def test_role_grant_log_contains_group_name(self):
+        """The ROLE_GRANTED record must name the group that was assigned."""
+        group, _ = Group.objects.get_or_create(name='Instructor')
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.user.groups.add(group)
+        entries = [m for m in cm.output if 'ROLE_GRANTED' in m]
+        self.assertTrue(any('Instructor' in e for e in entries),
+                        f'Group name not found in: {entries}')
+
+    def test_role_grant_log_contains_username(self):
+        """The ROLE_GRANTED record must identify the user receiving the role."""
+        group, _ = Group.objects.get_or_create(name='Instructor')
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.user.groups.add(group)
+        entries = [m for m in cm.output if 'ROLE_GRANTED' in m]
+        self.assertTrue(any('audituser' in e for e in entries))
+
+    def test_role_revoke_log_contains_group_name(self):
+        """The ROLE_REVOKED record must name the group that was removed."""
+        group, _ = Group.objects.get_or_create(name='Instructor')
+        self.user.groups.add(group)
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.user.groups.remove(group)
+        entries = [m for m in cm.output if 'ROLE_REVOKED' in m]
+        self.assertTrue(any('Instructor' in e for e in entries))
+
+    # ── Sensitive-data protection (cross-cutting) ──────────────────────────────
+
+    def test_no_session_cookie_in_any_log(self):
+        """
+        Session identifiers must never appear in audit records.
+        We log in, capture ALL audit records during the request, and verify
+        no session-like patterns are present.
+        """
+        self._do_login()
+        session_key = self.client.session.session_key
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self.client.post(self.logout_url)
+        self._assert_no_sensitive_value(cm.output, session_key)
+
+    def test_no_password_hash_in_any_log(self):
+        """The user's hashed password must never appear in audit records."""
+        self.user.refresh_from_db()
+        password_hash = self.user.password          # e.g. 'pbkdf2_sha256$...'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as cm:
+            self._do_login()
+        self._assert_no_sensitive_value(cm.output, password_hash)

@@ -31,6 +31,7 @@ body:
     attributes:
       label: Student identity and app name
       description: State the student name and the Django app name that must be derived from it.
+      placeholder: Student name: Jane Doe. Required app name: janedoe or jane_doe.
       placeholder: "Student name: Jane Doe. Required app name: janedoe or jane_doe."
     validations:
       required: true

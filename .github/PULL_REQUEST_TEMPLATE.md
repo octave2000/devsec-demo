@@ -21,6 +21,10 @@
 ## Validation
 - Describe how you verified the change.
 
+## Checklist
+- [ ] I linked the related issue
+- [ ] I tested the change locally
+- [ ] I updated any directly related documentation or configuration
 ## AI Assistance Used
 - State whether you used AI tools. If yes, name the tool(s) and describe the limited support they provided.
 

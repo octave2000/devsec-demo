@@ -9,7 +9,7 @@ body:
         
         Student submissions should follow the repository AI and authorship policy:
         limited AI support is allowed with disclosure, but students must own the
-        implementation and be able to explain their security decisions and tests.
+        implementation and be able to explain their security decisions and tests
   - type: textarea
     id: objective
     attributes:
