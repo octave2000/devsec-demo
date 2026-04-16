@@ -2,6 +2,19 @@ name: CI
 
 on:
   pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
   push:
     branches:
       - main
@@ -11,6 +24,32 @@ permissions:
 
 jobs:
   lint:
+  issues: read
+  pull-requests: read
+
+jobs:
+  pr-submission-hygiene:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out base repository state
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate pull request body
+        run: python .github/scripts/validate_pr_submission.py
+
+  lint:
+    if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
 
     steps:
@@ -29,3 +68,51 @@ jobs:
 
       - name: Lint with Ruff
         run: python -m ruff check .
+          python -m pip install -r requirements.txt python-dotenv ruff==0.15.10
+
+      - name: Lint with Ruff
+        run: python -m ruff check .
+
+  django-health:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+
+    env:
+      DJANGO_SECRET_KEY: ci-secret-key
+      DJANGO_DEBUG: "False"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt python-dotenv
+
+      - name: Run Django system checks
+        run: python manage.py check
+
+      - name: Run Django tests
+        run: python manage.py test
+
+  submission-tooling-tests:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run submission tooling tests
+        run: python -m unittest discover -s tests
