@@ -13,6 +13,7 @@ Design principles:
   - All checks are server-side; templates only consume the results.
 """
 from functools import wraps
+from urllib.parse import urlencode
 
 from django.contrib.auth.mixins import UserPassesTestMixin
 from django.core.exceptions import PermissionDenied
@@ -88,7 +89,10 @@ class _RoleCheckMixin(UserPassesTestMixin):
 
     def handle_no_permission(self):
         if not self.request.user.is_authenticated:
-            return redirect(f'{self.login_url}?next={self.request.path}')
+            # URL-encode the path so special characters in the path value
+            # do not corrupt the query string (e.g. paths containing '&' or '#').
+            qs = urlencode({'next': self.request.path})
+            return redirect(f'{self.login_url}?{qs}')
         raise PermissionDenied
 
 
@@ -132,7 +136,8 @@ def _make_decorator(test_fn):
         def wrapper(request, *args, **kwargs):
             if not request.user.is_authenticated:
                 login = reverse_lazy('mupenz_fulgence:login')
-                return redirect(f'{login}?next={request.path}')
+                qs = urlencode({'next': request.path})
+                return redirect(f'{login}?{qs}')
             if not test_fn(request.user):
                 raise PermissionDenied
             return view_func(request, *args, **kwargs)

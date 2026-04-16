@@ -1498,3 +1498,261 @@ class CSRFEnforcementTests(TestCase):
             'csrfmiddlewaretoken': csrf_token,
         })
         self.assertNotEqual(response.status_code, 403)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Open redirect protection
+# ──────────────────────────────────────────────────────────────────────────────
+
+class OpenRedirectTests(TestCase):
+    """
+    Verify that the login endpoint cannot be weaponised as an open redirector.
+
+    Attack scenario
+    ───────────────
+    An attacker sends a victim the link:
+        https://app.example.com/auth/login/?next=https://evil.com/
+
+    If the application blindly trusts the ``next`` query parameter, the
+    victim is authenticated and then silently sent to the attacker's site,
+    which can serve a phishing page or capture session data.
+
+    Why Django's built-in protection is trusted here
+    ─────────────────────────────────────────────────
+    ``UserLoginView`` extends ``django.contrib.auth.views.LoginView``, which
+    inherits ``RedirectURLMixin.get_redirect_url()``.  That method calls
+    ``url_has_allowed_host_and_scheme()`` before honouring any ``next``
+    value, and returns ``""`` for unsafe URLs.  When ``next`` is empty,
+    ``get_success_url()`` falls back to ``settings.LOGIN_REDIRECT_URL``.
+
+    ``UserLogoutView`` uses the same mixin, so it is equally protected.
+
+    These tests are regression guards: they prove the built-in protection
+    is active and has not been accidentally disabled or bypassed.
+
+    URL encoding note
+    ─────────────────
+    The helper ``_login()`` uses ``urllib.parse.urlencode`` so that values
+    like ``http://evil.com/`` are correctly percent-encoded in the query
+    string and then decoded by Django's ``QueryDict`` before validation —
+    exactly mirroring what a real browser would do.
+    """
+
+    DEFAULT_REDIRECT = '/auth/'   # settings.LOGIN_REDIRECT_URL
+
+    def setUp(self):
+        cache.clear()
+        self.client = Client()
+        self.user = make_user(
+            username='openuser',
+            password='StrongPass123!',
+            email='open@example.com',
+        )
+        self.login_url = reverse('mupenz_fulgence:login')
+
+    def _login(self, next_url=None):
+        """
+        POST valid credentials to the login endpoint.
+        When *next_url* is given it is properly URL-encoded into the query
+        string so the test mirrors real browser behaviour.
+        """
+        from urllib.parse import urlencode
+        url = self.login_url
+        if next_url is not None:
+            url = f'{url}?{urlencode({"next": next_url})}'
+        return self.client.post(url, {
+            'username': 'openuser',
+            'password': 'StrongPass123!',
+        })
+
+    # ── Safe internal redirects (must be honoured) ─────────────────────────────
+
+    def test_safe_internal_path_is_followed(self):
+        """
+        A relative path that stays within the application must be honoured.
+        This proves legitimate ``?next=`` usage (e.g. from @login_required)
+        still works after a successful login.
+        """
+        response = self._login(next_url='/auth/profile/')
+        self.assertRedirects(response, '/auth/profile/', fetch_redirect_response=False)
+
+    def test_safe_internal_path_with_query_string_is_followed(self):
+        """next= paths that carry their own query string must still be allowed."""
+        response = self._login(next_url='/auth/staff/users/?q=alice')
+        self.assertRedirects(
+            response, '/auth/staff/users/?q=alice', fetch_redirect_response=False
+        )
+
+    def test_missing_next_redirects_to_default(self):
+        """No ``next`` parameter → login sends user to LOGIN_REDIRECT_URL."""
+        response = self._login()
+        self.assertRedirects(
+            response, self.DEFAULT_REDIRECT, fetch_redirect_response=False
+        )
+
+    # ── External URLs (must be blocked) ───────────────────────────────────────
+
+    def test_external_http_url_blocked(self):
+        """
+        ``?next=http://evil.com/`` must not redirect the user off-site.
+        url_has_allowed_host_and_scheme rejects any URL with a foreign netloc.
+        """
+        response = self._login(next_url='http://evil.com/')
+        location = response.get('Location', '')
+        self.assertNotIn('evil.com', location)
+        self.assertRedirects(
+            response, self.DEFAULT_REDIRECT, fetch_redirect_response=False
+        )
+
+    def test_external_https_url_blocked(self):
+        """HTTPS external URLs are also rejected — scheme alone is not sufficient."""
+        response = self._login(next_url='https://evil.com/steal-session')
+        location = response.get('Location', '')
+        self.assertNotIn('evil.com', location)
+        self.assertRedirects(
+            response, self.DEFAULT_REDIRECT, fetch_redirect_response=False
+        )
+
+    def test_protocol_relative_url_blocked(self):
+        """
+        ``//evil.com/`` is a protocol-relative URL that inherits the page
+        scheme and redirects to an external host.  It must be blocked.
+        """
+        response = self._login(next_url='//evil.com/')
+        location = response.get('Location', '')
+        self.assertNotIn('evil.com', location)
+        self.assertRedirects(
+            response, self.DEFAULT_REDIRECT, fetch_redirect_response=False
+        )
+
+    def test_javascript_pseudo_url_blocked(self):
+        """
+        ``javascript:`` pseudo-URLs are not valid redirect targets and must
+        be blocked to prevent XSS via location-based script injection.
+        """
+        response = self._login(next_url='javascript:alert(document.cookie)')
+        location = response.get('Location', '')
+        self.assertNotIn('javascript', location)
+        self.assertRedirects(
+            response, self.DEFAULT_REDIRECT, fetch_redirect_response=False
+        )
+
+    # ── Encoded / obfuscated attack vectors ───────────────────────────────────
+
+    def test_encoded_protocol_relative_url_blocked(self):
+        """
+        ``%2F%2Fevil.com%2F`` decodes to ``//evil.com/``.
+        Django's QueryDict decodes the value before it reaches
+        url_has_allowed_host_and_scheme, so the validation still blocks it.
+        """
+        # Pass the already-encoded value; urlencode will double-encode it,
+        # but that is intentional — Django decodes query string values once.
+        from urllib.parse import quote
+        encoded = quote('//evil.com/', safe='')          # → %2F%2Fevil.com%2F
+        url = f'{self.login_url}?next={encoded}'
+        response = self.client.post(url, {
+            'username': 'openuser',
+            'password': 'StrongPass123!',
+        })
+        location = response.get('Location', '')
+        self.assertNotIn('evil.com', location)
+
+    def test_backslash_host_bypass_blocked(self):
+        """
+        ``/\\evil.com`` is sometimes parsed by browsers as a redirect to
+        evil.com.  url_has_allowed_host_and_scheme is aware of this trick.
+        """
+        response = self._login(next_url='/\\evil.com')
+        location = response.get('Location', '')
+        self.assertNotIn('evil.com', location)
+
+
+class SafeRedirectUrlTests(TestCase):
+    """
+    Unit tests for the ``safe_redirect_url()`` utility in utils.py.
+
+    These tests exercise the function in isolation using Django's
+    ``RequestFactory`` so they are fast and do not hit the database.
+
+    The utility wraps ``url_has_allowed_host_and_scheme`` with a
+    named, importable interface that any custom view can call when it
+    needs to redirect based on user-supplied input.
+    """
+
+    def setUp(self):
+        from django.test import RequestFactory
+        self.request = RequestFactory().get('/')
+        # RequestFactory sets SERVER_NAME='testserver', SERVER_PORT='80'
+        # so request.get_host() == 'testserver'.
+
+    def _safe(self, url, **kw):
+        from mupenz_fulgence.utils import safe_redirect_url
+        return safe_redirect_url(self.request, url, **kw)
+
+    # ── URLs that must be allowed ──────────────────────────────────────────────
+
+    def test_relative_path_is_allowed(self):
+        self.assertEqual(self._safe('/auth/profile/'), '/auth/profile/')
+
+    def test_relative_path_with_query_string_is_allowed(self):
+        self.assertEqual(
+            self._safe('/auth/staff/users/?q=test'), '/auth/staff/users/?q=test'
+        )
+
+    def test_same_host_absolute_url_is_allowed(self):
+        """An absolute URL whose host matches the request host is safe."""
+        self.assertEqual(
+            self._safe('http://testserver/auth/'), 'http://testserver/auth/'
+        )
+
+    def test_root_path_is_allowed(self):
+        self.assertEqual(self._safe('/'), '/')
+
+    # ── URLs that must be blocked ──────────────────────────────────────────────
+
+    def test_external_http_url_uses_fallback(self):
+        result = self._safe('http://evil.com/', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_external_https_url_uses_fallback(self):
+        result = self._safe('https://evil.com/', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_protocol_relative_url_uses_fallback(self):
+        result = self._safe('//evil.com/', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_javascript_pseudo_url_uses_fallback(self):
+        result = self._safe('javascript:alert(1)', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_data_uri_uses_fallback(self):
+        result = self._safe('data:text/html,<script>alert(1)</script>', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_empty_string_uses_fallback(self):
+        result = self._safe('', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    def test_none_equivalent_blocked(self):
+        """A URL that is falsy should fall back, not crash."""
+        result = self._safe('   ', fallback='/auth/')
+        self.assertEqual(result, '/auth/')
+
+    # ── Default fallback behaviour ─────────────────────────────────────────────
+
+    def test_default_fallback_is_dashboard(self):
+        """
+        When no explicit fallback is given and the URL is unsafe, the function
+        returns the dashboard URL (defined in utils._SAFE_FALLBACK).
+        """
+        result = self._safe('http://evil.com/')
+        # Must not be the external URL
+        self.assertNotEqual(result, 'http://evil.com/')
+        # Must be a non-empty internal path
+        self.assertTrue(result.startswith('/'))
+
+    def test_custom_fallback_is_respected(self):
+        """Callers can override the default fallback per call-site."""
+        result = self._safe('http://evil.com/', fallback='/custom/landing/')
+        self.assertEqual(result, '/custom/landing/')
