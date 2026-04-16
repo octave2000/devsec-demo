@@ -5,6 +5,77 @@
 {% block content %}
 <div class="row justify-content-center">
   <div class="col-lg-7">
+
+    <!-- Avatar & Document quick-access cards -->
+    <div class="row g-3 mb-4">
+
+      <!-- Avatar card -->
+      <div class="col-sm-6">
+        <div class="card h-100">
+          <div class="card-body p-3 d-flex align-items-center gap-3">
+            {% if object.avatar %}
+              <img src="{{ object.avatar.url }}"
+                   alt="Your profile picture"
+                   class="rounded-circle border flex-shrink-0"
+                   style="width:56px;height:56px;object-fit:cover;">
+            {% else %}
+              <div class="rounded-circle bg-secondary d-flex align-items-center
+                          justify-content-center flex-shrink-0"
+                   style="width:56px;height:56px;">
+                <i class="bi bi-person-fill text-white fs-4"></i>
+              </div>
+            {% endif %}
+            <div>
+              <div class="fw-semibold small">Profile Picture</div>
+              <div class="text-muted small">
+                {% if object.avatar %}Uploaded{% else %}None{% endif %}
+              </div>
+              <a href="{% url 'mupenz_fulgence:upload_avatar' %}"
+                 class="btn btn-outline-primary btn-sm mt-1">
+                <i class="bi bi-camera-fill me-1"></i>
+                {% if object.avatar %}Change{% else %}Upload{% endif %}
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Document card -->
+      <div class="col-sm-6">
+        <div class="card h-100">
+          <div class="card-body p-3 d-flex align-items-center gap-3">
+            <div class="flex-shrink-0 text-center" style="width:56px;">
+              {% if object.document %}
+                <i class="bi bi-file-earmark-pdf-fill text-danger fs-1"></i>
+              {% else %}
+                <i class="bi bi-file-earmark text-secondary fs-1"></i>
+              {% endif %}
+            </div>
+            <div>
+              <div class="fw-semibold small">PDF Document</div>
+              <div class="text-muted small">
+                {% if object.document %}Uploaded{% else %}None{% endif %}
+              </div>
+              <div class="d-flex flex-wrap gap-1 mt-1">
+                <a href="{% url 'mupenz_fulgence:upload_document' %}"
+                   class="btn btn-outline-primary btn-sm">
+                  <i class="bi bi-upload me-1"></i>
+                  {% if object.document %}Replace{% else %}Upload{% endif %}
+                </a>
+                {% if object.document %}
+                <a href="{% url 'mupenz_fulgence:serve_document' object.pk %}"
+                   class="btn btn-outline-secondary btn-sm">
+                  <i class="bi bi-download me-1"></i>Download
+                </a>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /avatar & doc row -->
+
     <div class="card">
       <div class="card-body p-4 p-md-5">
 
@@ -95,7 +166,7 @@
 
         </form>
       </div>
-    </div>
+    </div><!-- /card -->
   </div>
 </div>
 {% endblock %}

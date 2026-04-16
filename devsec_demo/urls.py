@@ -14,6 +14,8 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
@@ -24,5 +26,17 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('auth/', include('mupenz_fulgence.urls')),
 ]
+
+# ── Development media serving ──────────────────────────────────────────────
+# In development (DEBUG=True), Django's dev server can serve uploaded media
+# files.  In production, the web server (Nginx / Apache) should serve
+# MEDIA_ROOT/avatars/ directly.
+#
+# SECURITY: MEDIA_ROOT/documents/ must NOT be served here or by the web
+# server directly.  All document access goes through DocumentServeView which
+# enforces per-user ownership.  If you add Nginx rules for MEDIA_ROOT, add
+# an explicit "deny all" for the documents/ subdirectory.
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 

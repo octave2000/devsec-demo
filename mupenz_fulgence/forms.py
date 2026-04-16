@@ -5,6 +5,14 @@ from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
 
 from .models import Profile
+from .validators import (
+    ALLOWED_AVATAR_EXTENSIONS,
+    ALLOWED_DOCUMENT_EXTENSIONS,
+    AVATAR_MAX_BYTES,
+    DOCUMENT_MAX_BYTES,
+    validate_avatar,
+    validate_document,
+)
 
 # Matches any HTML tag: <tag>, </tag>, <tag attr="val"/>, etc.
 # Requires a letter immediately after the optional closing slash so that plain
@@ -194,3 +202,81 @@ class ProfileUpdateForm(forms.ModelForm):
             user.save()
             profile.save()
         return profile
+
+
+# ── File upload forms ──────────────────────────────────────────────────────────
+
+class AvatarUploadForm(forms.ModelForm):
+    """
+    Handles secure avatar uploads.
+
+    Security layers
+    ───────────────
+    1. forms.ImageField — Django's built-in field calls Pillow to verify that
+       the uploaded file is a real image (content-based, not just extension).
+    2. clean_avatar()   — additional size cap and extension whitelist,
+       plus an explicit call to validate_avatar() which also runs the Pillow
+       check at the model-validator level (defence-in-depth).
+
+    enctype="multipart/form-data" must be set on the HTML <form> tag.
+    """
+
+    avatar = forms.ImageField(
+        label='Profile Picture',
+        help_text=(
+            f'Upload a JPEG, PNG, or WebP image. '
+            f'Maximum size: {AVATAR_MAX_BYTES // (1024 * 1024)} MB.'
+        ),
+        widget=forms.ClearableFileInput(attrs={'class': 'form-control', 'accept': 'image/*'}),
+    )
+
+    class Meta:
+        model  = Profile
+        fields = ('avatar',)
+
+    def clean_avatar(self):
+        file = self.cleaned_data.get('avatar')
+        if file:
+            # Delegate to the centralised validator in validators.py.
+            # This runs the size check, extension whitelist, and Pillow verify().
+            validate_avatar(file)
+        return file
+
+
+class DocumentUploadForm(forms.ModelForm):
+    """
+    Handles secure PDF document uploads.
+
+    Security layers
+    ───────────────
+    1. forms.FileField  — basic file handling; does NOT validate content.
+    2. clean_document() — size cap, extension whitelist (.pdf only), and
+       magic-byte verification (file must start with b'%PDF-').
+       A PHP script renamed to 'resume.pdf' will be rejected at step 3.
+
+    Access control: documents are served ONLY via DocumentServeView, which
+    enforces ownership checks.  The raw storage path is never exposed.
+
+    enctype="multipart/form-data" must be set on the HTML <form> tag.
+    """
+
+    document = forms.FileField(
+        label='PDF Document',
+        help_text=(
+            f'Upload a PDF document. '
+            f'Maximum size: {DOCUMENT_MAX_BYTES // (1024 * 1024)} MB.'
+        ),
+        widget=forms.ClearableFileInput(attrs={'class': 'form-control', 'accept': '.pdf'}),
+    )
+
+    class Meta:
+        model  = Profile
+        fields = ('document',)
+
+    def clean_document(self):
+        file = self.cleaned_data.get('document')
+        if file:
+            # Delegate to the centralised validator in validators.py.
+            # This runs: size check → extension whitelist → PDF magic bytes.
+            validate_document(file)
+        return file

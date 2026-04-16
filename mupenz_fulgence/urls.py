@@ -43,6 +43,16 @@ urlpatterns = [
     # ── IDOR-safe profile detail (own profile for users; any for staff/admin) ──
     path('users/<int:pk>/profile/', views.UserProfileDetailView.as_view(), name='user_profile_detail'),
 
+    # ── Secure file uploads ───────────────────────────────────────────────────
+    # Avatar upload — always operates on the current user's own profile.
+    path('upload/avatar/',    views.AvatarUploadView.as_view(),   name='upload_avatar'),
+    # Document upload — always operates on the current user's own profile.
+    path('upload/document/',  views.DocumentUploadView.as_view(), name='upload_document'),
+    # Document serve — ownership-checked; staff/admin can access any profile.
+    # SECURITY: documents are NOT served via MEDIA_URL; only this view may
+    # deliver the file bytes after an authorization check.
+    path('users/<int:pk>/document/', views.DocumentServeView.as_view(), name='serve_document'),
+
     # ── RBAC — Admin only ─────────────────────────────────────────────────────
     path('admin-panel/', views.AdminDashboardView.as_view(), name='admin_dashboard'),
 ]

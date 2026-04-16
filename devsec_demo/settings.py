@@ -125,6 +125,30 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# ── Media files (user uploads) ─────────────────────────────────────────────
+# MEDIA_ROOT is the filesystem directory where uploaded files are stored.
+# MEDIA_URL is the URL prefix used to serve PUBLIC media files (avatars).
+#
+# SECURITY NOTES:
+#   • Documents are stored under MEDIA_ROOT/documents/ but are NOT served via
+#     MEDIA_URL.  They must be accessed ONLY via DocumentServeView, which
+#     enforces per-user ownership checks.
+#   • In production, configure your web server (Nginx / Apache) to serve
+#     MEDIA_ROOT/avatars/ directly but deny direct access to
+#     MEDIA_ROOT/documents/ — all document requests should proxy through Django.
+#   • Never set MEDIA_ROOT inside a directory served as STATIC_ROOT.
+MEDIA_URL  = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# ── Upload size limits ─────────────────────────────────────────────────────
+# Django's in-memory upload threshold — files larger than this are written to
+# a temporary file on disk instead of being held in RAM.  This is NOT a
+# security limit; the per-type size limits are enforced in validators.py.
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024   # 2 MB in-memory threshold
+# Cap the total size of a single multipart POST body.  This prevents a
+# client from sending an unbounded request body before Django reads it.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB max request body
+
 # ── Authentication routing ─────────────────────────────────────────────────
 # Where to send users after a successful login / logout,
 # and where LoginRequiredMixin redirects unauthenticated requests.

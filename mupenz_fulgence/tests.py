@@ -11,18 +11,30 @@ Coverage:
   - IDOR / Broken Access Control: profile detail access by pk
   - Password reset: full flow, anti-enumeration, invalid tokens, validation
   - Brute-force protection: lockout mechanics, counter reset, UX messages
+  - Stored XSS: input validation and safe rendering
+  - Secure file uploads: avatar and document validation + access control
 """
+import io
+
 from django.contrib.auth.models import Group, User
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
 from django.core.cache import cache
-from django.test import Client, TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+from PIL import Image
 
 from .models import Profile
 from .rbac import get_user_role
+from .validators import (
+    AVATAR_MAX_BYTES,
+    DOCUMENT_MAX_BYTES,
+    validate_avatar,
+    validate_document,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1951,6 +1963,510 @@ class StoredXSSTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'alice')
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File upload — helper factories
+# ──────────────────────────────────────────────────────────────────────────────
+
+def make_image_file(fmt='PNG', width=10, height=10, name=None) -> SimpleUploadedFile:
+    """Return a SimpleUploadedFile containing a real, Pillow-generated image."""
+    buf = io.BytesIO()
+    Image.new('RGB', (width, height), color=(255, 0, 0)).save(buf, format=fmt)
+    buf.seek(0)
+    filename = name or f'test.{fmt.lower()}'
+    mime     = f'image/{fmt.lower()}'
+    return SimpleUploadedFile(filename, buf.read(), content_type=mime)
+
+
+def make_pdf_file(name='test.pdf', size_bytes=512) -> SimpleUploadedFile:
+    """Return a SimpleUploadedFile containing a minimal valid PDF."""
+    # A real (though trivially short) PDF body — starts with the magic bytes.
+    content = b'%PDF-1.4\n1 0 obj\n<</Type /Catalog>>\nendobj\nstartxref\n0\n%%EOF'
+    content = content.ljust(size_bytes, b'\n')   # pad to requested size
+    return SimpleUploadedFile(name, content, content_type='application/pdf')
+
+
+def make_fake_pdf(name='evil.pdf') -> SimpleUploadedFile:
+    """Return a file with a .pdf extension but no PDF magic bytes (malicious rename)."""
+    content = b'<?php system($_GET["cmd"]); ?>'
+    return SimpleUploadedFile(name, content, content_type='application/pdf')
+
+
+def make_fake_image(name='evil.jpg') -> SimpleUploadedFile:
+    """Return a file with a .jpg extension but no image content (malicious rename)."""
+    content = b'<script>alert(1)</script>'
+    return SimpleUploadedFile(name, content, content_type='image/jpeg')
+
+
+def make_oversized_image(limit_bytes=AVATAR_MAX_BYTES) -> SimpleUploadedFile:
+    """Return a SimpleUploadedFile whose .size exceeds the avatar limit."""
+    # We create a real PNG first, then patch its size attribute.
+    f = make_image_file()
+    f.size = limit_bytes + 1
+    return f
+
+
+def make_oversized_pdf(limit_bytes=DOCUMENT_MAX_BYTES) -> SimpleUploadedFile:
+    """Return a SimpleUploadedFile whose .size exceeds the document limit."""
+    f = make_pdf_file()
+    f.size = limit_bytes + 1
+    return f
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File upload — unit tests for validators (no HTTP)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class FileValidatorUnitTests(TestCase):
+    """
+    Unit tests for validate_avatar() and validate_document() from validators.py.
+
+    These tests exercise the validators in isolation — no views or HTTP
+    requests involved.  They verify the three security layers for each type:
+      Avatar   : size limit → extension whitelist → Pillow content check
+      Document : size limit → extension whitelist → PDF magic-byte check
+    """
+
+    # ── validate_avatar ────────────────────────────────────────────────────────
+
+    def test_valid_png_passes(self):
+        """A real PNG image within the size limit must pass without raising."""
+        from django.core.exceptions import ValidationError
+        validate_avatar(make_image_file('PNG'))   # must not raise
+
+    def test_valid_jpeg_passes(self):
+        from django.core.exceptions import ValidationError
+        validate_avatar(make_image_file('JPEG', name='photo.jpg'))
+
+    def test_valid_webp_passes(self):
+        from django.core.exceptions import ValidationError
+        validate_avatar(make_image_file('WEBP', name='photo.webp'))
+
+    def test_avatar_oversized_rejected(self):
+        """A file larger than AVATAR_MAX_BYTES must be rejected."""
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            validate_avatar(make_oversized_image())
+
+    def test_avatar_wrong_extension_rejected(self):
+        """A file with a .pdf extension must be rejected (wrong type for avatar)."""
+        from django.core.exceptions import ValidationError
+        f = make_pdf_file(name='photo.pdf')
+        with self.assertRaises(ValidationError):
+            validate_avatar(f)
+
+    def test_avatar_fake_image_rejected(self):
+        """
+        Security test: a script renamed to .jpg must be rejected.
+        Pillow cannot open non-image bytes and raises UnidentifiedImageError,
+        which validate_avatar() converts to ValidationError.
+        """
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            validate_avatar(make_fake_image())
+
+    def test_avatar_executable_rejected(self):
+        """An EXE header renamed to .png must be rejected."""
+        from django.core.exceptions import ValidationError
+        f = SimpleUploadedFile(
+            'malware.png',
+            b'MZ\x90\x00' + b'\x00' * 200,   # DOS/EXE magic bytes
+            content_type='image/png',
+        )
+        with self.assertRaises(ValidationError):
+            validate_avatar(f)
+
+    # ── validate_document ──────────────────────────────────────────────────────
+
+    def test_valid_pdf_passes(self):
+        """A file with the correct PDF magic bytes and .pdf extension must pass."""
+        from django.core.exceptions import ValidationError
+        validate_document(make_pdf_file())   # must not raise
+
+    def test_document_oversized_rejected(self):
+        """A file larger than DOCUMENT_MAX_BYTES must be rejected."""
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            validate_document(make_oversized_pdf())
+
+    def test_document_wrong_extension_rejected(self):
+        """A .jpg extension must be rejected for document uploads."""
+        from django.core.exceptions import ValidationError
+        f = make_image_file('JPEG', name='doc.jpg')
+        with self.assertRaises(ValidationError):
+            validate_document(f)
+
+    def test_document_fake_pdf_rejected(self):
+        """
+        Security test: a PHP script renamed to .pdf must be rejected.
+        The file lacks the b'%PDF-' magic bytes → ValidationError.
+        """
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            validate_document(make_fake_pdf())
+
+    def test_document_html_renamed_to_pdf_rejected(self):
+        """An HTML file renamed to .pdf must be rejected by the magic-byte check."""
+        from django.core.exceptions import ValidationError
+        f = SimpleUploadedFile(
+            'xss.pdf',
+            b'<html><script>alert(1)</script></html>',
+            content_type='application/pdf',
+        )
+        with self.assertRaises(ValidationError):
+            validate_document(f)
+
+    def test_document_exe_renamed_to_pdf_rejected(self):
+        """An EXE file renamed to .pdf must be rejected."""
+        from django.core.exceptions import ValidationError
+        f = SimpleUploadedFile(
+            'malware.pdf',
+            b'MZ\x90\x00' + b'\x00' * 200,
+            content_type='application/pdf',
+        )
+        with self.assertRaises(ValidationError):
+            validate_document(f)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File upload — avatar upload view (integration tests)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@override_settings(MEDIA_ROOT='/tmp/mf_test_media')
+class AvatarUploadViewTests(TestCase):
+    """
+    Integration tests for AvatarUploadView (/auth/upload/avatar/).
+
+    Uses @override_settings(MEDIA_ROOT=...) so test uploads go to a temp
+    directory and never touch the real media folder.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.user   = make_user()
+        self.client.login(username='testuser', password='StrongPass123!')
+        self.url = reverse('mupenz_fulgence:upload_avatar')
+
+    # ── Page access ───────────────────────────────────────────────────────────
+
+    def test_upload_page_requires_login(self):
+        """Anonymous users must be redirected to the login page."""
+        anon = Client()
+        response = anon.get(self.url)
+        self.assertRedirects(response, f'{reverse("mupenz_fulgence:login")}?next={self.url}')
+
+    def test_upload_page_renders_for_authenticated_user(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'mupenz_fulgence/upload_avatar.html')
+
+    # ── Valid upload ───────────────────────────────────────────────────────────
+
+    def test_valid_png_upload_succeeds(self):
+        """A valid PNG image must be accepted and redirect back to profile."""
+        response = self.client.post(self.url, {'avatar': make_image_file('PNG')})
+        self.assertRedirects(response, reverse('mupenz_fulgence:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.avatar))
+
+    def test_valid_jpeg_upload_succeeds(self):
+        response = self.client.post(
+            self.url, {'avatar': make_image_file('JPEG', name='photo.jpg')}
+        )
+        self.assertRedirects(response, reverse('mupenz_fulgence:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.avatar))
+
+    # ── Invalid uploads ───────────────────────────────────────────────────────
+
+    def test_fake_image_rejected(self):
+        """
+        Security test: a script file renamed to .jpg must be rejected.
+        The form must be invalid and no file stored.
+        """
+        response = self.client.post(self.url, {'avatar': make_fake_image()})
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        # Profile avatar must remain empty
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.avatar))
+
+    def test_executable_renamed_to_png_rejected(self):
+        """EXE content with .png extension must be rejected."""
+        f = SimpleUploadedFile(
+            'malware.png',
+            b'MZ\x90\x00' + b'\x00' * 200,
+            content_type='image/png',
+        )
+        response = self.client.post(self.url, {'avatar': f})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_pdf_rejected_as_avatar(self):
+        """A PDF file must be rejected when uploaded as an avatar."""
+        response = self.client.post(self.url, {'avatar': make_pdf_file(name='photo.pdf')})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_wrong_extension_html_rejected(self):
+        """An HTML file must be rejected regardless of Content-Type."""
+        f = SimpleUploadedFile(
+            'page.html',
+            b'<html><body>hi</body></html>',
+            content_type='image/jpeg',
+        )
+        response = self.client.post(self.url, {'avatar': f})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_oversized_avatar_rejected(self):
+        """
+        A file exceeding the size limit must be rejected with an error.
+
+        Why not use make_oversized_image() here?
+        Django's test client re-encodes the file as a multipart request body,
+        so the server-side InMemoryUploadedFile.size is recalculated from the
+        actual byte content — any .size patch on the in-process object is lost.
+        We instead lower the module-level AVATAR_MAX_BYTES constant to 1 byte
+        below the real file's size, so the server-side check fires correctly.
+        """
+        from unittest.mock import patch
+        img = make_image_file('PNG')
+        # Read the actual encoded size so we can set the limit just below it
+        real_size = len(img.read())
+        img.seek(0)
+        with patch('mupenz_fulgence.validators.AVATAR_MAX_BYTES', real_size - 1):
+            response = self.client.post(self.url, {'avatar': img})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+        self.assertIn('avatar', response.context['form'].errors)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File upload — document upload view (integration tests)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@override_settings(MEDIA_ROOT='/tmp/mf_test_media')
+class DocumentUploadViewTests(TestCase):
+    """
+    Integration tests for DocumentUploadView (/auth/upload/document/).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.user   = make_user()
+        self.client.login(username='testuser', password='StrongPass123!')
+        self.url = reverse('mupenz_fulgence:upload_document')
+
+    # ── Page access ───────────────────────────────────────────────────────────
+
+    def test_upload_page_requires_login(self):
+        anon = Client()
+        response = anon.get(self.url)
+        self.assertRedirects(response, f'{reverse("mupenz_fulgence:login")}?next={self.url}')
+
+    def test_upload_page_renders_for_authenticated_user(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'mupenz_fulgence/upload_document.html')
+
+    # ── Valid upload ───────────────────────────────────────────────────────────
+
+    def test_valid_pdf_upload_succeeds(self):
+        """A valid PDF must be accepted and redirect back to profile."""
+        response = self.client.post(self.url, {'document': make_pdf_file()})
+        self.assertRedirects(response, reverse('mupenz_fulgence:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.document))
+
+    # ── Invalid uploads ───────────────────────────────────────────────────────
+
+    def test_fake_pdf_rejected(self):
+        """
+        Security test: a PHP script renamed to .pdf must be rejected.
+        The magic-byte check (b'%PDF-') fails for non-PDF content.
+        """
+        response = self.client.post(self.url, {'document': make_fake_pdf()})
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('document', form.errors)
+        # Profile document must remain empty
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.document))
+
+    def test_image_rejected_as_document(self):
+        """A valid image file must be rejected when uploaded as a document."""
+        response = self.client.post(self.url, {'document': make_image_file('PNG', name='doc.png')})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_html_renamed_to_pdf_rejected(self):
+        """An XSS payload in an HTML file renamed .pdf must be rejected."""
+        f = SimpleUploadedFile(
+            'xss.pdf',
+            b'<html><script>alert(1)</script></html>',
+            content_type='application/pdf',
+        )
+        response = self.client.post(self.url, {'document': f})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_exe_renamed_to_pdf_rejected(self):
+        """An executable renamed to .pdf must be rejected by magic-byte check."""
+        f = SimpleUploadedFile(
+            'malware.pdf',
+            b'MZ\x90\x00' + b'\x00' * 200,
+            content_type='application/pdf',
+        )
+        response = self.client.post(self.url, {'document': f})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_oversized_document_rejected(self):
+        """
+        A file exceeding the size limit must be rejected.
+
+        Same reasoning as AvatarUploadViewTests.test_oversized_avatar_rejected:
+        the test client re-encodes the file, so we patch DOCUMENT_MAX_BYTES to
+        be 1 byte below the real file's byte count instead of using a fake .size.
+        """
+        from unittest.mock import patch
+        pdf = make_pdf_file()
+        real_size = len(pdf.read())
+        pdf.seek(0)
+        with patch('mupenz_fulgence.validators.DOCUMENT_MAX_BYTES', real_size - 1):
+            response = self.client.post(self.url, {'document': pdf})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+        self.assertIn('document', response.context['form'].errors)
+
+    def test_js_file_rejected(self):
+        """A JavaScript file must be rejected by the extension whitelist."""
+        f = SimpleUploadedFile(
+            'attack.js',
+            b'alert(1)',
+            content_type='application/javascript',
+        )
+        response = self.client.post(self.url, {'document': f})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File upload — document access control (DocumentServeView)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@override_settings(MEDIA_ROOT='/tmp/mf_test_media')
+class DocumentAccessControlTests(TestCase):
+    """
+    Authorization tests for DocumentServeView (/auth/users/<pk>/document/).
+
+    Security properties verified:
+      - Anonymous users are redirected to login.
+      - A user can download their own document.
+      - A user requesting another user's document pk gets HTTP 404 (not 403),
+        preventing object-existence enumeration (same IDOR rationale as profile
+        detail view).
+      - Staff can access any user's document.
+      - A request for a profile with no document returns HTTP 404.
+    """
+
+    def setUp(self):
+        self.client  = Client()
+        self.owner   = make_user(username='doc_owner', email='owner@example.com')
+        self.other   = make_user(username='doc_other', email='other@example.com')
+        self.staff   = make_staff_user()
+        # Attach a valid PDF directly to the owner's profile (bypasses the view
+        # so we can test DocumentServeView independently of DocumentUploadView).
+        profile = self.owner.profile
+        profile.document.save(
+            'test.pdf',
+            SimpleUploadedFile('test.pdf', make_pdf_file().read(),
+                               content_type='application/pdf'),
+            save=True,
+        )
+        self.owner_profile = profile
+        self.other_profile = self.other.profile
+        self.login_url     = reverse('mupenz_fulgence:login')
+
+    def _url(self, profile):
+        return reverse('mupenz_fulgence:serve_document', kwargs={'pk': profile.pk})
+
+    # ── Anonymous ─────────────────────────────────────────────────────────────
+
+    def test_anonymous_redirected_to_login(self):
+        url = self._url(self.owner_profile)
+        response = self.client.get(url)
+        self.assertRedirects(response, f'{self.login_url}?next={url}')
+
+    # ── Owner access ──────────────────────────────────────────────────────────
+
+    def test_owner_can_download_own_document(self):
+        """The document owner must receive a PDF attachment response."""
+        self.client.login(username='doc_owner', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertIn('attachment', response.get('Content-Disposition', ''))
+
+    # ── IDOR: regular user requesting another user's document ─────────────────
+
+    def test_cross_user_document_returns_404(self):
+        """
+        IDOR fix: a regular user requesting another user's document pk must
+        receive HTTP 404, NOT 403 (same rationale as profile detail view).
+        """
+        self.client.login(username='doc_other', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile))
+        self.assertEqual(response.status_code, 404)
+
+    def test_nonexistent_pk_returns_404(self):
+        """A totally nonexistent pk must return 404 for both regular and staff."""
+        self.client.login(username='doc_owner', password='StrongPass123!')
+        url = reverse('mupenz_fulgence:serve_document', kwargs={'pk': 99999})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+
+    # ── Profile without document ───────────────────────────────────────────────
+
+    def test_profile_without_document_returns_404(self):
+        """If the owner has no document uploaded, the serve view returns 404."""
+        self.client.login(username='doc_other', password='StrongPass123!')
+        # other_profile has no document (setUp only sets owner's)
+        # Staff path is needed since other user can't see other_profile via regular path
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.other_profile))
+        self.assertEqual(response.status_code, 404)
+
+    # ── Staff access (legitimate) ─────────────────────────────────────────────
+
+    def test_staff_can_download_any_document(self):
+        """Staff must be able to download any user's document for management."""
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(self._url(self.owner_profile))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+
+    # ── Filename randomization check ──────────────────────────────────────────
+
+    def test_stored_filename_is_randomized(self):
+        """
+        The storage path must not match the original upload filename.
+        This verifies that avatar_upload_to / document_upload_to replace
+        the original name with a UUID-based string.
+        """
+        profile = self.owner_profile
+        self.assertIn('/', profile.document.name)   # has a directory component
+        # The basename must NOT be 'test.pdf' (the original name)
+        import os
+        stored_name = os.path.basename(profile.document.name)
+        self.assertNotEqual(stored_name, 'test.pdf')
+        # It should be a hex string + .pdf (32 hex chars + extension)
+        self.assertTrue(stored_name.endswith('.pdf'))
+        self.assertGreater(len(stored_name), 10)
 
 
 class SafeRedirectUrlTests(TestCase):

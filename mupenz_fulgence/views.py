@@ -1,13 +1,18 @@
+import os
+
 from django.contrib import messages
 from django.contrib.auth import views as auth_views
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group, User
+from django.core.exceptions import PermissionDenied
 from django.db.models import Q
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
+from django.views import View
 from django.views.generic import CreateView, ListView, TemplateView, UpdateView
 
-from .forms import ProfileUpdateForm, RegistrationForm
+from .forms import AvatarUploadForm, DocumentUploadForm, ProfileUpdateForm, RegistrationForm
 from .login_protection import (
     LOCKOUT_DURATION,
     MAX_ATTEMPTS,
@@ -550,3 +555,154 @@ class UserPasswordResetCompleteView(auth_views.PasswordResetCompleteView):
     Step 4 — Final confirmation page; directs the user back to the login page.
     """
     template_name = 'mupenz_fulgence/registration/password_reset_complete.html'
+
+
+# ---------------------------------------------------------------------------
+# Secure file uploads
+# ---------------------------------------------------------------------------
+
+class AvatarUploadView(LoginRequiredMixin, View):
+    """
+    Handles avatar (profile picture) uploads for the authenticated user.
+
+    Security design
+    ───────────────
+    • Always operates on the CURRENT user's own profile — not a pk from the
+      URL — so a logged-in user cannot overwrite another user's avatar.
+    • AvatarUploadForm performs two-layer validation:
+        - Django's forms.ImageField calls Pillow to verify real image content.
+        - validate_avatar() adds a size cap and extension whitelist.
+    • Old avatar file is deleted from storage before saving the new one to
+      prevent accumulation of stale files.
+    • The form uses enctype="multipart/form-data" (set in the template).
+    """
+
+    template_name = 'mupenz_fulgence/upload_avatar.html'
+    login_url = reverse_lazy('mupenz_fulgence:login')
+
+    def _get_profile(self):
+        profile, _ = Profile.objects.get_or_create(user=self.request.user)
+        return profile
+
+    def get(self, request):
+        profile = self._get_profile()
+        form = AvatarUploadForm(instance=profile)
+        return render(request, self.template_name, {'form': form, 'profile': profile})
+
+    def post(self, request):
+        profile = self._get_profile()
+        form = AvatarUploadForm(request.POST, request.FILES, instance=profile)
+        if form.is_valid():
+            # Delete the previous avatar file from storage to avoid orphaned files.
+            if profile.avatar:
+                try:
+                    storage = profile.avatar.storage
+                    old_name = profile.avatar.name
+                    if storage.exists(old_name):
+                        storage.delete(old_name)
+                except Exception:
+                    pass  # Non-fatal: storage cleanup failure must not block the upload
+            form.save()
+            messages.success(request, 'Your profile picture has been updated.')
+            return redirect('mupenz_fulgence:profile')
+        return render(request, self.template_name, {'form': form, 'profile': profile})
+
+
+class DocumentUploadView(LoginRequiredMixin, View):
+    """
+    Handles PDF document uploads for the authenticated user.
+
+    Security design
+    ───────────────
+    • Always operates on the CURRENT user's own profile — not a pk from the
+      URL — so a logged-in user cannot overwrite another user's document.
+    • DocumentUploadForm validates: size ≤ 5 MB, extension == '.pdf', and
+      the first 5 bytes must equal b'%PDF-' (magic-byte check).  A renamed
+      executable or script will be rejected at the magic-byte step.
+    • Old document file is deleted before saving the replacement.
+    • Documents are NEVER served via MEDIA_URL; only DocumentServeView
+      (which enforces ownership) is authorised to deliver the file bytes.
+    """
+
+    template_name = 'mupenz_fulgence/upload_document.html'
+    login_url = reverse_lazy('mupenz_fulgence:login')
+
+    def _get_profile(self):
+        profile, _ = Profile.objects.get_or_create(user=self.request.user)
+        return profile
+
+    def get(self, request):
+        profile = self._get_profile()
+        form = DocumentUploadForm(instance=profile)
+        return render(request, self.template_name, {'form': form, 'profile': profile})
+
+    def post(self, request):
+        profile = self._get_profile()
+        form = DocumentUploadForm(request.POST, request.FILES, instance=profile)
+        if form.is_valid():
+            # Delete the previous document file from storage.
+            if profile.document:
+                try:
+                    storage = profile.document.storage
+                    old_name = profile.document.name
+                    if storage.exists(old_name):
+                        storage.delete(old_name)
+                except Exception:
+                    pass  # Non-fatal: cleanup failure must not block the upload
+            form.save()
+            messages.success(request, 'Your document has been uploaded successfully.')
+            return redirect('mupenz_fulgence:profile')
+        return render(request, self.template_name, {'form': form, 'profile': profile})
+
+
+class DocumentServeView(LoginRequiredMixin, View):
+    """
+    Serve a user's PDF document with ownership-enforced access control.
+
+    Security design
+    ───────────────
+    The document field's storage path is NEVER included in MEDIA_URL, so the
+    file cannot be fetched by guessing its path.  All downloads must go
+    through this view, which enforces two rules:
+
+      Regular users  → may download ONLY their own document.
+                       Other profile pks return HTTP 404 (not 403) to avoid
+                       leaking whether the document exists (same rationale as
+                       the IDOR fix in UserProfileDetailView).
+
+      Staff / admins → may download any user's document for management purposes.
+
+    The file is sent as an attachment (Content-Disposition: attachment) so that
+    browsers download it rather than attempting to render it inline.  This
+    eliminates the risk of a malformed PDF triggering browser-level exploits.
+
+    URL: /auth/users/<pk>/document/
+    """
+
+    login_url = reverse_lazy('mupenz_fulgence:login')
+
+    def get(self, request, pk):
+        # Ownership-enforced profile lookup (mirrors UserProfileDetailView)
+        if is_staff_or_admin(request.user):
+            profile = get_object_or_404(Profile, pk=pk)
+        else:
+            # Returns 404 for foreign pks — avoids leaking existence (IDOR fix)
+            profile = get_object_or_404(Profile, pk=pk, user=request.user)
+
+        if not profile.document:
+            raise Http404('No document has been uploaded for this profile.')
+
+        # Use FileResponse to stream the file without buffering it in memory.
+        # as_attachment=True forces a download dialog, preventing inline rendering.
+        try:
+            file_handle = profile.document.open('rb')
+        except (FileNotFoundError, OSError):
+            raise Http404('Document file not found.')
+
+        filename = os.path.basename(profile.document.name)
+        return FileResponse(
+            file_handle,
+            as_attachment=True,
+            filename=filename,
+            content_type='application/pdf',
+        )
