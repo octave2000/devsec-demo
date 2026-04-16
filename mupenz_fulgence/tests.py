@@ -1667,6 +1667,292 @@ class OpenRedirectTests(TestCase):
         self.assertNotIn('evil.com', location)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Stored XSS — input validation and safe rendering
+# ──────────────────────────────────────────────────────────────────────────────
+
+class StoredXSSTests(TestCase):
+    """
+    Security tests for Stored Cross-Site Scripting (XSS) vulnerabilities.
+
+    Threat model
+    ────────────
+    An attacker submits a payload such as <script>alert(1)</script> via a
+    profile field (bio, location, first_name, last_name).  If the application
+    stores and later renders this markup without sanitisation, the script
+    executes in any visitor's browser — a classic stored XSS attack.
+
+    Defence layers verified here
+    ────────────────────────────
+    1. Form-level validation (_reject_html) rejects HTML tags before they reach
+       the database.  This is defence-in-depth: the database stays clean even
+       if a future template accidentally uses |safe.
+    2. Django's template auto-escaping neutralises any markup that does reach
+       the database (e.g. via direct DB writes or the Django admin).
+       assertNotContains(response, '<script>') confirms the raw tag is absent
+       from rendered HTML.
+
+    Fields tested: bio, location, first_name, last_name (profile update form)
+                   first_name, last_name (registration form)
+    """
+
+    XSS_PAYLOADS = [
+        '<script>alert(1)</script>',
+        '<img src=x onerror=alert(1)>',
+        '<svg onload=alert(1)>',
+        '"><script>alert(document.cookie)</script>',
+        "';alert(String.fromCharCode(88,83,83))//",
+        # HTML-entity-encoded variants that browsers decode before parsing
+        '&lt;script&gt;alert(1)&lt;/script&gt;',
+        # Null-byte injection attempt
+        '<scr\x00ipt>alert(1)</scr\x00ipt>',
+    ]
+
+    SAFE_TEXT_SAMPLES = [
+        'Hello, world!',
+        'Born in Kigali, Rwanda.',
+        'I love math: a < b && b > c.',
+        'Price is $5.00 (approx).',
+        'Line one\nLine two',
+    ]
+
+    def setUp(self):
+        self.client = Client()
+        self.user = make_user()
+        self.client.login(username='testuser', password='StrongPass123!')
+        self.profile_url = reverse('mupenz_fulgence:profile')
+        self.register_url = reverse('mupenz_fulgence:register')
+
+    # ── Form validation — HTML tags must be rejected ───────────────────────────
+
+    def _post_profile(self, **overrides):
+        """Submit the profile form with safe defaults, overriding named fields."""
+        data = {
+            'first_name': 'Test',
+            'last_name': 'User',
+            'email': 'test@example.com',
+            'bio': 'A normal bio.',
+            'location': 'Kigali',
+            'birth_date': '',
+        }
+        data.update(overrides)
+        return self.client.post(self.profile_url, data)
+
+    def test_bio_with_script_tag_rejected(self):
+        """
+        XSS fix: bio containing a <script> tag must be rejected at the form
+        level — the form must be invalid and the database must stay clean.
+        """
+        response = self._post_profile(bio='<script>alert(1)</script>')
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('bio', form.errors)
+        # Confirm the payload was not persisted
+        self.user.profile.refresh_from_db()
+        self.assertNotIn('<script>', self.user.profile.bio or '')
+
+    def test_location_with_html_tag_rejected(self):
+        """HTML in the location field must be rejected by form validation."""
+        response = self._post_profile(location='<img src=x onerror=alert(1)>')
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('location', form.errors)
+
+    def test_first_name_with_html_tag_rejected(self):
+        """HTML in first_name must be rejected by form validation."""
+        response = self._post_profile(first_name='<b>Evil</b>')
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('first_name', form.errors)
+
+    def test_last_name_with_html_tag_rejected(self):
+        """HTML in last_name must be rejected by form validation."""
+        response = self._post_profile(last_name='<i>Injection</i>')
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('last_name', form.errors)
+
+    def test_multiple_xss_payloads_rejected_in_bio(self):
+        """All common XSS vectors must be rejected in the bio field."""
+        html_payloads = [p for p in self.XSS_PAYLOADS if '<' in p or '>' in p]
+        for payload in html_payloads:
+            with self.subTest(payload=payload):
+                response = self._post_profile(bio=payload)
+                self.assertEqual(response.status_code, 200)
+                form = response.context['form']
+                self.assertFalse(
+                    form.is_valid(),
+                    f'Form accepted XSS payload in bio: {payload!r}',
+                )
+
+    # ── Registration form — name fields must reject HTML ───────────────────────
+    # Note: RegisterView redirects already-authenticated users, so these tests
+    # use a fresh anonymous client instead of self.client (which is logged in).
+
+    def test_registration_first_name_html_rejected(self):
+        """
+        HTML in first_name during registration must be rejected before the
+        account is created, so the user object is never persisted with markup.
+        """
+        anon = Client()
+        response = anon.post(self.register_url, {
+            'username': 'xssreg',
+            'email': 'xssreg@example.com',
+            'first_name': '<script>alert(1)</script>',
+            'last_name': 'User',
+            'password1': 'StrongPass123!',
+            'password2': 'StrongPass123!',
+        })
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('first_name', form.errors)
+        self.assertFalse(User.objects.filter(username='xssreg').exists())
+
+    def test_registration_last_name_html_rejected(self):
+        """HTML in last_name during registration must prevent account creation."""
+        anon = Client()
+        response = anon.post(self.register_url, {
+            'username': 'xssreg2',
+            'email': 'xssreg2@example.com',
+            'first_name': 'Test',
+            'last_name': '<svg onload=alert(1)>',
+            'password1': 'StrongPass123!',
+            'password2': 'StrongPass123!',
+        })
+        self.assertEqual(response.status_code, 200)
+        form = response.context['form']
+        self.assertFalse(form.is_valid())
+        self.assertIn('last_name', form.errors)
+        self.assertFalse(User.objects.filter(username='xssreg2').exists())
+
+    # ── Template auto-escaping — raw tags must never appear in HTML output ─────
+
+    def _force_set_bio(self, value):
+        """
+        Bypass form validation and write directly to the database.
+        This simulates data inserted via the Django admin, fixtures, or a
+        future code path that omits validation — the rendering layer must
+        still be safe.
+        """
+        profile = self.user.profile
+        profile.bio = value
+        profile.save()
+
+    def test_stored_script_tag_escaped_on_dashboard(self):
+        """
+        If a raw <script> tag somehow reaches the database (e.g. via admin),
+        Django's auto-escaping must prevent it from executing on the dashboard.
+        The raw tag must not appear in the rendered HTML.
+        """
+        self._force_set_bio('<script>alert(1)</script>')
+        response = self.client.get(reverse('mupenz_fulgence:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        # Raw script tag must NOT appear — it must be HTML-entity-encoded
+        self.assertNotContains(response, '<script>alert(1)</script>')
+        # The escaped form should be present (confirms Django did not silently
+        # drop the value — it rendered it safely)
+        self.assertContains(response, '&lt;script&gt;')
+
+    def test_stored_script_tag_escaped_on_profile_detail(self):
+        """
+        Same as above, but verified on the user profile detail page where
+        bio is also displayed.
+        """
+        self._force_set_bio('<script>alert(document.cookie)</script>')
+        profile = self.user.profile
+        detail_url = reverse(
+            'mupenz_fulgence:user_profile_detail', kwargs={'pk': profile.pk}
+        )
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<script>alert(document.cookie)</script>')
+        self.assertContains(response, '&lt;script&gt;')
+
+    def test_img_onerror_payload_escaped_on_dashboard(self):
+        """Event-handler injection via <img onerror=...> must also be escaped."""
+        self._force_set_bio('<img src=x onerror=alert(1)>')
+        response = self.client.get(reverse('mupenz_fulgence:dashboard'))
+        self.assertNotContains(response, '<img src=x onerror=alert(1)>')
+        self.assertContains(response, '&lt;img')
+
+    # ── Safe content — legitimate text must render correctly ───────────────────
+
+    def test_safe_text_renders_correctly_on_dashboard(self):
+        """Normal bio text must still be visible after the XSS fixes."""
+        for text in self.SAFE_TEXT_SAMPLES:
+            with self.subTest(text=text):
+                self._force_set_bio(text)
+                response = self.client.get(reverse('mupenz_fulgence:dashboard'))
+                self.assertEqual(response.status_code, 200)
+                # The plain text content must appear somewhere in the response
+                # (Django may escape special chars like < and &, so we check
+                # for short, unambiguous fragments only).
+                safe_fragment = text.split('<')[0].split('&')[0].strip()
+                if safe_fragment:
+                    self.assertContains(response, safe_fragment)
+
+    def test_profile_update_with_clean_text_succeeds(self):
+        """
+        Verify that the form-level XSS validators do NOT block legitimate
+        content — only actual HTML tags should be rejected.
+        """
+        response = self._post_profile(
+            first_name='Jane',
+            last_name='Doe',
+            bio='I enjoy hiking & photography.',
+            location='Kigali, Rwanda',
+        )
+        # Successful update redirects back to the profile page
+        self.assertRedirects(response, self.profile_url)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Jane')
+        self.assertEqual(self.user.profile.location, 'Kigali, Rwanda')
+
+    # ── Reflected XSS — search_query must be escaped in HTML output ────────────
+
+    def test_search_query_script_tag_not_executed(self):
+        """
+        XSS risk: the search query is reflected in the User Management page.
+        A malicious ?q=<script>...</script> must not appear unescaped in the
+        response HTML.
+        """
+        staff = make_staff_user()
+        self.client.login(username='staff_user', password='StrongPass123!')
+        payload = '<script>alert(1)</script>'
+        response = self.client.get(
+            reverse('mupenz_fulgence:user_list') + f'?q={payload}'
+        )
+        self.assertEqual(response.status_code, 200)
+        # Raw tag must not appear in rendered output
+        self.assertNotContains(response, '<script>alert(1)</script>')
+
+    def test_search_query_img_payload_not_executed(self):
+        """Event-handler payloads in ?q= must also be safely escaped."""
+        make_staff_user()
+        self.client.login(username='staff_user', password='StrongPass123!')
+        payload = '<img src=x onerror=alert(1)>'
+        response = self.client.get(
+            reverse('mupenz_fulgence:user_list') + f'?q={payload}'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<img src=x onerror=alert(1)>')
+
+    def test_search_query_normal_text_reflected_safely(self):
+        """Normal search queries must still be echoed back in the response."""
+        make_staff_user()
+        self.client.login(username='staff_user', password='StrongPass123!')
+        response = self.client.get(
+            reverse('mupenz_fulgence:user_list') + '?q=alice'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'alice')
+
+
 class SafeRedirectUrlTests(TestCase):
     """
     Unit tests for the ``safe_redirect_url()`` utility in utils.py.
