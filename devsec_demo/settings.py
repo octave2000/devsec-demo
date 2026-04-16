@@ -68,6 +68,8 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                # RBAC: injects user_role, is_instructor, is_staff_member, is_admin
+                'mupenz_fulgence.context_processors.user_roles',
             ],
         },
     },

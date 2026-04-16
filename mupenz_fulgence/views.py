@@ -1,13 +1,15 @@
 from django.contrib import messages
 from django.contrib.auth import views as auth_views
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.contrib.auth.models import User
-from django.shortcuts import redirect
+from django.contrib.auth.models import Group, User
+from django.db.models import Q
+from django.shortcuts import redirect, render
 from django.urls import reverse_lazy
-from django.views.generic import CreateView, TemplateView, UpdateView
+from django.views.generic import CreateView, ListView, TemplateView, UpdateView
 
 from .forms import ProfileUpdateForm, RegistrationForm
 from .models import Profile
+from .rbac import AdminRequiredMixin, InstructorRequiredMixin, StaffRequiredMixin, get_user_role
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +158,168 @@ class UserPasswordChangeView(LoginRequiredMixin, auth_views.PasswordChangeView):
             'Password change failed. Please review the errors below.',
         )
         return super().form_invalid(form)
+
+
+# ---------------------------------------------------------------------------
+# Custom 403 handler
+# ---------------------------------------------------------------------------
+
+def permission_denied_view(request, exception=None):
+    """Renders a styled 403 page instead of Django's plain default."""
+    return render(request, '403.html', status=403)
+
+
+# ---------------------------------------------------------------------------
+# RBAC — Instructor Panel  (Instructor group | staff | admin)
+# ---------------------------------------------------------------------------
+
+class InstructorPanelView(InstructorRequiredMixin, TemplateView):
+    """
+    Accessible to Instructor group members, staff, and admins.
+    Shows a read-only overview of registered users.
+    """
+    template_name = 'mupenz_fulgence/instructor_panel.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['total_users'] = User.objects.filter(is_active=True).count()
+        context['recent_users'] = (
+            User.objects.filter(is_active=True)
+            .order_by('-date_joined')[:8]
+        )
+        return context
+
+
+# ---------------------------------------------------------------------------
+# RBAC — Staff Dashboard  (staff | admin)
+# ---------------------------------------------------------------------------
+
+class StaffDashboardView(StaffRequiredMixin, TemplateView):
+    """
+    Management overview for staff and admins.
+    Shows user counts broken down by role plus recent registrations.
+    """
+    template_name = 'mupenz_fulgence/staff_dashboard.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        instructor_group = Group.objects.filter(name='Instructor').first()
+        student_group    = Group.objects.filter(name='Student').first()
+        instructor_ids = set(
+            instructor_group.user_set.values_list('id', flat=True)
+            if instructor_group else []
+        )
+        student_ids = set(
+            student_group.user_set.values_list('id', flat=True)
+            if student_group else []
+        )
+
+        context['total_users']       = User.objects.count()
+        context['total_active']      = User.objects.filter(is_active=True).count()
+        context['total_staff']       = User.objects.filter(is_staff=True, is_superuser=False).count()
+        context['total_admins']      = User.objects.filter(is_superuser=True).count()
+        context['total_instructors'] = len(instructor_ids)
+        context['total_students']    = len(student_ids)
+        context['total_regular']     = (
+            User.objects.filter(is_staff=False, is_superuser=False)
+            .exclude(id__in=instructor_ids | student_ids)
+            .count()
+        )
+        context['recent_users'] = (
+            User.objects.order_by('-date_joined')
+            .prefetch_related('groups')[:10]
+        )
+        return context
+
+
+# ---------------------------------------------------------------------------
+# RBAC — User List  (staff | admin)
+# ---------------------------------------------------------------------------
+
+class UserListView(StaffRequiredMixin, ListView):
+    """
+    Paginated, searchable list of all users with their computed roles.
+    Accessible to staff and admins only.
+    """
+    model = User
+    template_name = 'mupenz_fulgence/user_list.html'
+    context_object_name = 'users'
+    paginate_by = 20
+
+    _ROLE_BADGE = {
+        'admin':      'danger',
+        'staff':      'warning',
+        'instructor': 'info',
+        'student':    'success',
+        'user':       'secondary',
+    }
+
+    def get_queryset(self):
+        qs = (
+            User.objects.order_by('-date_joined')
+            .prefetch_related('groups')
+            .select_related('profile')
+        )
+        q = self.request.GET.get('q', '').strip()
+        if q:
+            qs = qs.filter(
+                Q(username__icontains=q)
+                | Q(email__icontains=q)
+                | Q(first_name__icontains=q)
+                | Q(last_name__icontains=q)
+            )
+        return qs
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Annotate each user with a pre-computed role (groups already prefetched)
+        group_pks = {
+            name: pk for name, pk in
+            Group.objects.filter(name__in=['Instructor', 'Student'])
+            .values_list('name', 'pk')
+        }
+        instructor_pk = group_pks.get('Instructor')
+        student_pk    = group_pks.get('Student')
+
+        for u in context['users']:
+            if u.is_superuser:
+                role = 'admin'
+            elif u.is_staff:
+                role = 'staff'
+            else:
+                user_group_pks = {g.pk for g in u.groups.all()}
+                if instructor_pk and instructor_pk in user_group_pks:
+                    role = 'instructor'
+                elif student_pk and student_pk in user_group_pks:
+                    role = 'student'
+                else:
+                    role = 'user'
+            u.computed_role    = role
+            u.role_badge_class = self._ROLE_BADGE[role]
+        context['search_query'] = self.request.GET.get('q', '')
+        return context
+
+
+# ---------------------------------------------------------------------------
+# RBAC — Admin Dashboard  (superuser only)
+# ---------------------------------------------------------------------------
+
+class AdminDashboardView(AdminRequiredMixin, TemplateView):
+    """
+    Full system overview for superusers only.
+    """
+    template_name = 'mupenz_fulgence/admin_dashboard.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['total_users']    = User.objects.count()
+        context['total_staff']    = User.objects.filter(is_staff=True).count()
+        context['total_admins']   = User.objects.filter(is_superuser=True).count()
+        context['total_inactive'] = User.objects.filter(is_active=False).count()
+        groups = list(Group.objects.prefetch_related('user_set', 'permissions'))
+        for g in groups:
+            g.member_count = g.user_set.count()
+        context['groups'] = groups
+        context['recent_users'] = User.objects.order_by('-date_joined')[:5]
+        return context
